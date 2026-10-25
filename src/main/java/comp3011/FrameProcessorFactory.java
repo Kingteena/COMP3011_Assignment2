@@ -8,14 +8,26 @@
  */
 package comp3011;
 
+import org.bytedeco.javacv.Frame;
+
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.function.Supplier;
 
 /**
- * Factory responsible for creating new FrameProcessor instances
- * from short CLI character codes and long option names.
+ * Factory responsible for instantiating {@link FrameProcessor} effects from short CLI
+ * character codes and long option names. Isolating object creation here keeps
+ * {@link CommandLineController} decoupled from concrete effect implementations.
+ *
+ * <p>
+ * To add a new frame processor, subclass {@link FrameProcessor} and implement
+ * {@link FrameProcessor#initialise(InfoVideo)} and {@link FrameProcessor#process(Frame, InfoFrame)}.
+ * Ensure {@code process()} is deterministic (seeded from {@code info.frameNumber()}) and avoids
+ * mutating shared instance buffers so a single instance can safely process frames across multiple
+ * worker threads. Then add a single {@code register(shortCode, longName, NewProcessor::new)}
+ * entry in the static block below and document the flag in {@link CommandLineController#printHelp()}.
+ * </p>
  */
 public final class FrameProcessorFactory {
 
