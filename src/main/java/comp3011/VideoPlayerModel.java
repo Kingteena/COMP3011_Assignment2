@@ -32,10 +32,12 @@ import java.util.function.Consumer;
  *
  * <p>Owns the FFmpeg decoder, playback clock, seeking logic, audio scheduling, and frame processing.
  * Supports both single-threaded cooperative multi-tasking and high-performance multi-threaded
- * pipelining with deterministic frame ordering and thread-safe FFmpeg synchronization.</p>
+ * pipelining with deterministic frame ordering, rapid-seek epoch invalidation, robust EOF lifecycle
+ * handling, and thread-safe FFmpeg synchronization.</p>
  */
 public class VideoPlayerModel {
-    private static final long NO_SEEK_REQUEST = -1; // Sentinel value used when no seek position is active.
+    private static final long NO_SEEK_REQUEST =
+            -1; // Sentinel value used when no seek position is active.
     private static final long FIVE_SECONDS_US = 5_000_000L;
     private static final long AUDIO_LEAD_NS = 30_000_000L;
     private static final int PIPELINE_QUEUE_CAPACITY = 16;
@@ -51,29 +53,24 @@ public class VideoPlayerModel {
 
     // Concurrency controls for multi-threaded pipelining
     private final Object grabberLock = new Object();
+    private final Object demuxerSignal = new Object();
     private final AtomicLong currentEpoch = new AtomicLong(0);
-    private final BlockingQueue<EpochFuture> framePipelineQueue = new LinkedBlockingQueue<>(PIPELINE_QUEUE_CAPACITY);
-    private final ThreadLocal<JavaFXFrameConverter> workerConverters = ThreadLocal.withInitial(JavaFXFrameConverter::new);
+    private final BlockingQueue<EpochFuture> framePipelineQueue =
+            new LinkedBlockingQueue<>(PIPELINE_QUEUE_CAPACITY);
+    private final ThreadLocal<JavaFXFrameConverter> workerConverters =
+            ThreadLocal.withInitial(JavaFXFrameConverter::new);
 
-    // This is the critical wiring that allows the framework (JavaFX) to call
-    // into our model logic every time it goes around its event loop. Every GUI
-    // system has an event loop so that button clicks, key presses and window
-    // resizes can be responded to. Most offer ways of running additional logic
-    // in either idle time (when there are no pending UI events to process) or
-    // on a regular heart beat, such as with this JavaFX AnimationTimer. Here
-    // we just create a little anonymous local subclass and override the handle
-    // method to call the method we want run every heart beat.
+    private ThreadPoolExecutor workerPool;
+    private Thread demuxerThread;
 
     private final AnimationTimer playbackTimer =
-     new AnimationTimer() {
-        @Override
-        public void handle(long now) {
-            pumpPlayback(now);
-        }
-    };
+            new AnimationTimer() {
+                @Override
+                public void handle(long now) {
+                    pumpPlayback(now);
+                }
+            };
 
-    private ExecutorService workerPool;
-    private Thread demuxerThread;
     private File videoFile;
     private FFmpegFrameGrabber grabber;
     private JavaFXFrameConverter converter; // Used in single-threaded fallback mode
@@ -100,15 +97,38 @@ public class VideoPlayerModel {
     /**
      * Standard constructor enabling multi-threaded decoding and processing by default.
      */
-    public VideoPlayerModel(boolean audioEnabled, BiConsumer<Integer, Integer> videoSizeChangedHandler, Consumer<Image> frameReadyHandler, Consumer<String> statusChangedHandler, BiConsumer<Boolean, Boolean> playbackStateChangedHandler, Consumer<Boolean> audioOutputStateChangedHandler, List<FrameProcessor> frameProcessors) {
-        this(audioEnabled, videoSizeChangedHandler, frameReadyHandler, statusChangedHandler, playbackStateChangedHandler, audioOutputStateChangedHandler, frameProcessors, true);
+    public VideoPlayerModel(
+            boolean audioEnabled,
+            BiConsumer<Integer, Integer> videoSizeChangedHandler,
+            Consumer<Image> frameReadyHandler,
+            Consumer<String> statusChangedHandler,
+            BiConsumer<Boolean, Boolean> playbackStateChangedHandler,
+            Consumer<Boolean> audioOutputStateChangedHandler,
+            List<FrameProcessor> frameProcessors) {
+        this(
+                audioEnabled,
+                videoSizeChangedHandler,
+                frameReadyHandler,
+                statusChangedHandler,
+                playbackStateChangedHandler,
+                audioOutputStateChangedHandler,
+                frameProcessors,
+                true);
     }
 
     /**
      * Overloaded constructor allowing explicit selection between multi-threaded and
      * single-threaded modes for comparative benchmarking and testing.
      */
-    public VideoPlayerModel(boolean audioEnabled, BiConsumer<Integer, Integer> videoSizeChangedHandler, Consumer<Image> frameReadyHandler, Consumer<String> statusChangedHandler, BiConsumer<Boolean, Boolean> playbackStateChangedHandler, Consumer<Boolean> audioOutputStateChangedHandler, List<FrameProcessor> frameProcessors, boolean multiThreaded) {
+    public VideoPlayerModel(
+            boolean audioEnabled,
+            BiConsumer<Integer, Integer> videoSizeChangedHandler,
+            Consumer<Image> frameReadyHandler,
+            Consumer<String> statusChangedHandler,
+            BiConsumer<Boolean, Boolean> playbackStateChangedHandler,
+            Consumer<Boolean> audioOutputStateChangedHandler,
+            List<FrameProcessor> frameProcessors,
+            boolean multiThreaded) {
         this.audioOutputEnabled = audioEnabled;
         this.videoSizeChangedHandler = videoSizeChangedHandler;
         this.frameReadyHandler = frameReadyHandler;
@@ -119,9 +139,6 @@ public class VideoPlayerModel {
         this.multiThreaded = multiThreaded;
     }
 
-    public boolean isMultiThreaded() {
-        return multiThreaded;
-    }
 
     public void play(File file) {
         videoFile = file;
@@ -200,7 +217,8 @@ public class VideoPlayerModel {
             return;
         }
 
-        long baseTimestampUs = relativeSeekBaseUs != NO_SEEK_REQUEST ? relativeSeekBaseUs : currentTimestampUs;
+        long baseTimestampUs =
+                relativeSeekBaseUs != NO_SEEK_REQUEST ? relativeSeekBaseUs : currentTimestampUs;
         seekTo(baseTimestampUs + offsetUs);
     }
 
@@ -213,8 +231,11 @@ public class VideoPlayerModel {
             return;
         }
 
-        long newEpoch = currentEpoch.incrementAndGet();
+        currentEpoch.incrementAndGet();
         clearPipelineQueue();
+        synchronized (demuxerSignal) {
+            demuxerSignal.notifyAll();
+        }
 
         try {
             synchronized (grabberLock) {
@@ -231,12 +252,14 @@ public class VideoPlayerModel {
         }
     }
 
-    private void startPlayback(long startTimestampUs, boolean initiallyPaused, long initialRelativeSeekBaseUs) {
+    private void startPlayback(
+            long startTimestampUs, boolean initiallyPaused, long initialRelativeSeekBaseUs) {
         currentEpoch.incrementAndGet();
         closePlaybackResources();
 
         pauseRequested = initiallyPaused;
-        currentTimestampUs = initialRelativeSeekBaseUs != NO_SEEK_REQUEST ? initialRelativeSeekBaseUs : startTimestampUs;
+        currentTimestampUs =
+                initialRelativeSeekBaseUs != NO_SEEK_REQUEST ? initialRelativeSeekBaseUs : startTimestampUs;
         relativeSeekBaseUs = initialRelativeSeekBaseUs;
 
         notifyStatusChanged(videoFile.getName());
@@ -290,11 +313,17 @@ public class VideoPlayerModel {
 
     private void startMultiThreadedPipeline() {
         int threads = Math.max(2, Runtime.getRuntime().availableProcessors());
-        workerPool = Executors.newFixedThreadPool(threads, r -> {
-            Thread t = new Thread(r, "VideoPlayer-Worker");
-            t.setDaemon(true);
-            return t;
-        });
+        workerPool = new ThreadPoolExecutor(
+                threads,
+                threads,
+                0L,
+                TimeUnit.MILLISECONDS,
+                new LinkedBlockingQueue<>(),
+                r -> {
+                    Thread t = new Thread(r, "VideoPlayer-Worker");
+                    t.setDaemon(true);
+                    return t;
+                });
 
         demuxerThread = new Thread(this::runDemuxerLoop, "VideoPlayer-Demuxer");
         demuxerThread.setDaemon(true);
@@ -320,9 +349,28 @@ public class VideoPlayerModel {
                 break;
             }
 
+            // End-of-file reached by FFmpeg decoder
             if (rawFrame == null) {
-                Platform.runLater(this::finishPlayback);
-                break;
+                if (epoch == currentEpoch.get()) {
+                    try {
+                        framePipelineQueue.put(EpochFuture.eof(epoch));
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                }
+                // Park demuxer thread until a seek/restart changes epoch or playback closes
+                synchronized (demuxerSignal) {
+                    while (playbackOpen && epoch == currentEpoch.get()) {
+                        try {
+                            demuxerSignal.wait();
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            break;
+                        }
+                    }
+                }
+                continue;
             }
 
             if (epoch != currentEpoch.get()) {
@@ -339,18 +387,33 @@ public class VideoPlayerModel {
                 frameNumber = grabber.getFrameNumber();
             }
 
+            // Route audio packets if samples are present
             if (audioAvailable && rawFrame.samples != null) {
                 queueAudio(timestampUs, rawFrame);
             }
 
-            if (rawFrame.image == null) {
+            // Frame Validity Check: ONLY treat frame as a video frame if image is present
+            // and dimensions are strictly positive (> 0)
+            if (rawFrame.image == null || rawFrame.imageWidth <= 0 || rawFrame.imageHeight <= 0) {
                 continue;
             }
 
             // Ensure frame processors are initialized with video metadata
             if (!frameProcessorsInitialised) {
                 try {
-                    initialiseFrameProcessors(new InfoVideo(mediaName(videoFile), totalVideoFrames, rawFrame.imageWidth, rawFrame.imageHeight, rawFrame.imageDepth, rawFrame.imageChannels, rawFrame.imageStride, frameRate, intFrameRate, videoFrameDurationUs, grabber.getPixelFormat()));
+                    initialiseFrameProcessors(
+                            new InfoVideo(
+                                    mediaName(videoFile),
+                                    totalVideoFrames,
+                                    rawFrame.imageWidth,
+                                    rawFrame.imageHeight,
+                                    rawFrame.imageDepth,
+                                    rawFrame.imageChannels,
+                                    rawFrame.imageStride,
+                                    frameRate,
+                                    intFrameRate,
+                                    videoFrameDurationUs,
+                                    grabber.getPixelFormat()));
                     frameProcessorsInitialised = true;
                 } catch (Exception e) {
                     Platform.runLater(() -> handlePlaybackError(e));
@@ -358,32 +421,73 @@ public class VideoPlayerModel {
                 }
             }
 
+            // Establish the first timestamp of this playback epoch deterministically
+            synchronized (this) {
+                if (firstTimestampUs == NO_SEEK_REQUEST) {
+                    firstTimestampUs = timestampUs;
+                }
+            }
+
+            long baseTimestampUs = firstTimestampUs;
+            long relativeTimestampUs = Math.max(0, timestampUs - baseTimestampUs);
+            long logicalTimestampUs = logicalPlaybackBaseUs + relativeTimestampUs;
+
             // Deep-clone video frame so subsequent grabber.grab() calls do not corrupt buffer
             Frame frameToProcess = rawFrame.clone();
 
-            CompletableFuture<PreparedFrame> future = CompletableFuture.supplyAsync(() -> {
-                try {
-                    if (epoch != currentEpoch.get()) {
-                        return null;
+            ThreadPoolExecutor currentPool = workerPool;
+            if (!playbackOpen || currentPool == null || currentPool.isShutdown() || epoch != currentEpoch.get()) {
+                frameToProcess.close();
+                continue;
+            }
+
+            CompletableFuture<PreparedFrame> future;
+            try {
+                future = CompletableFuture.supplyAsync(() -> {
+                    try {
+                        if (epoch != currentEpoch.get()) {
+                            return null;
+                        }
+
+                        InfoFrame info = new InfoFrame(frameNumber, timestampUs);
+                        for (FrameProcessor processor : frameProcessors) {
+                            // Intra-pipeline epoch check: abort immediately on seek/stop
+                            if (epoch != currentEpoch.get()) {
+                                return null;
+                            }
+                            processor.process(frameToProcess, info);
+                        }
+
+                        if (epoch != currentEpoch.get()) {
+                            return null;
+                        }
+
+                        JavaFXFrameConverter localConverter = workerConverters.get();
+                        Image image = localConverter.convert(frameToProcess);
+                        long rawPreparedAtNs = System.nanoTime();
+
+                        if (epoch != currentEpoch.get()) {
+                            return null;
+                        }
+
+                        return new PreparedFrame(
+                                image,
+                                frameNumber,
+                                timestampUs,
+                                logicalTimestampUs,
+                                0L, // Calculated dynamically during presentation
+                                rawPreparedAtNs,
+                                relativeTimestampUs);
+                    } catch (Exception e) {
+                        throw new CompletionException(e);
+                    } finally {
+                        frameToProcess.close();
                     }
-
-                    InfoFrame info = new InfoFrame(frameNumber, timestampUs);
-                    processFrame(frameToProcess, info);
-
-                    JavaFXFrameConverter localConverter = workerConverters.get();
-                    Image image = localConverter.convert(frameToProcess);
-
-                    long targetTimeNs = computeTargetTimeNs(timestampUs);
-                    long relativeTimestampUs = firstTimestampUs != NO_SEEK_REQUEST ? Math.max(0, timestampUs - firstTimestampUs) : 0;
-                    long logicalTimestampUs = logicalPlaybackBaseUs + relativeTimestampUs;
-
-                    return new PreparedFrame(image, frameNumber, timestampUs, logicalTimestampUs, targetTimeNs, System.nanoTime());
-                } catch (Exception e) {
-                    throw new CompletionException(e);
-                } finally {
-                    frameToProcess.close();
-                }
-            }, workerPool);
+                }, currentPool);
+            } catch (RejectedExecutionException e) {
+                frameToProcess.close();
+                continue;
+            }
 
             try {
                 framePipelineQueue.put(new EpochFuture(epoch, future));
@@ -394,19 +498,10 @@ public class VideoPlayerModel {
         }
     }
 
-    private synchronized long computeTargetTimeNs(long timestampUs) {
-        if (firstTimestampUs == NO_SEEK_REQUEST) {
-            firstTimestampUs = timestampUs;
-            playbackStartNs = System.nanoTime();
-            if (pauseRequested) {
-                pauseStartedNs = playbackStartNs;
-            }
-        }
-        long relativeTimestampUs = Math.max(0, timestampUs - firstTimestampUs);
-        return playbackStartNs + relativeTimestampUs * 1_000L;
-    }
-
     private void clearPipelineQueue() {
+        if (workerPool != null) {
+            workerPool.getQueue().clear();
+        }
         EpochFuture ef;
         while ((ef = framePipelineQueue.poll()) != null) {
             ef.future().cancel(true);
@@ -458,12 +553,24 @@ public class VideoPlayerModel {
                 queueAudio(timestampUs, frame);
             }
 
-            if (frame.image == null) {
+            if (frame.image == null || frame.imageWidth <= 0 || frame.imageHeight <= 0) {
                 continue;
             }
 
             if (!frameProcessorsInitialised) {
-                initialiseFrameProcessors(new InfoVideo(mediaName(videoFile), totalVideoFrames, frame.imageWidth, frame.imageHeight, frame.imageDepth, frame.imageChannels, frame.imageStride, frameRate, intFrameRate, videoFrameDurationUs, grabber.getPixelFormat()));
+                initialiseFrameProcessors(
+                        new InfoVideo(
+                                mediaName(videoFile),
+                                totalVideoFrames,
+                                frame.imageWidth,
+                                frame.imageHeight,
+                                frame.imageDepth,
+                                frame.imageChannels,
+                                frame.imageStride,
+                                frameRate,
+                                intFrameRate,
+                                videoFrameDurationUs,
+                                grabber.getPixelFormat()));
                 frameProcessorsInitialised = true;
             }
 
@@ -484,19 +591,22 @@ public class VideoPlayerModel {
             long logicalTimestampUs = logicalPlaybackBaseUs + relativeTimestampUs;
             long targetTimeNs = playbackStartNs + relativeTimestampUs * 1_000L;
 
-            return new PreparedFrame(image, frameNumber, timestampUs, logicalTimestampUs, targetTimeNs, System.nanoTime());
+            return new PreparedFrame(
+                    image, frameNumber, timestampUs, logicalTimestampUs, targetTimeNs, System.nanoTime());
         }
 
         return null;
     }
 
-    private void pumpPlayback(long now) {
+    void pumpPlayback(long now) {
         if (!playbackOpen) {
             return;
         }
 
+        // Task (1): keep audio flowing
         writeDueAudio(now);
 
+        // Task (2): advance and display video frames
         if (multiThreaded) {
             pumpMultiThreadedPlayback(now);
         } else {
@@ -511,13 +621,14 @@ public class VideoPlayerModel {
 
         if (!pauseRequested && preparedFrame == null && !prepareNextFrameQueued) {
             prepareNextFrameQueued = true;
-            Platform.runLater(() -> {
-                prepareNextFrameQueued = false;
+            Platform.runLater(
+                    () -> {
+                        prepareNextFrameQueued = false;
 
-                if (!pauseRequested) {
-                    prepareNextFrame();
-                }
-            });
+                        if (!pauseRequested) {
+                            prepareNextFrame();
+                        }
+                    });
         }
     }
 
@@ -532,6 +643,10 @@ public class VideoPlayerModel {
             }
         }
 
+        if (pauseRequested && playbackStartNs > 0) {
+            return;
+        }
+
         while (preparedFrame == null) {
             EpochFuture head = framePipelineQueue.peek();
             if (head == null) {
@@ -544,6 +659,14 @@ public class VideoPlayerModel {
                 continue;
             }
 
+            // Display-aligned EOF handling: only finish when all queued frames have been presented
+            if (head.isEof()) {
+                writeDueAudio(now);
+                framePipelineQueue.poll();
+                finishPlayback();
+                return;
+            }
+
             if (!head.future().isDone()) {
                 break; // Head frame is still being processed
             }
@@ -551,18 +674,48 @@ public class VideoPlayerModel {
             framePipelineQueue.poll();
             try {
                 PreparedFrame frame = head.future().join();
-                if (frame != null) {
-                    if (frame.targetTimeNs() <= now) {
-                        preparedFrame = frame;
-                        displayPreparedFrame(now);
-                    } else {
-                        preparedFrame = frame;
+                if (head.epoch() != currentEpoch.get() || frame == null) {
+                    continue;
+                }
+
+                // Post-seek clock anchoring: anchor playbackStartNs cleanly when first frame presents
+                if (playbackStartNs <= 0) {
+                    playbackStartNs = now;
+                    if (pauseRequested) {
+                        pauseStartedNs = playbackStartNs;
                     }
-                    break;
+                }
+
+                long targetTimeNs = playbackStartNs + frame.relativeTimestampUs() * 1_000L;
+                long slotStartNs = targetTimeNs - videoFrameDurationUs * 1_000L;
+                long effectivePreparedAtNs = Math.max(frame.preparedAtNs(), slotStartNs);
+
+                PreparedFrame readyFrame = new PreparedFrame(
+                        frame.image(),
+                        frame.frameNumber(),
+                        frame.mediaTimestampUs(),
+                        frame.logicalTimestampUs(),
+                        targetTimeNs,
+                        effectivePreparedAtNs,
+                        frame.relativeTimestampUs());
+
+                if (readyFrame.targetTimeNs() <= now) {
+                    preparedFrame = readyFrame;
+                    displayPreparedFrame(now);
+                } else {
+                    preparedFrame = readyFrame;
+                }
+                break;
+            } catch (CancellationException e) {
+                // Normal when epoch changes or during seeks; safely drop and continue
+            } catch (CompletionException e) {
+                if (head.epoch() == currentEpoch.get()) {
+                    System.err.println("Worker error processing frame: " + e.getCause());
                 }
             } catch (Exception e) {
-                handlePlaybackError(e);
-                break;
+                if (head.epoch() == currentEpoch.get()) {
+                    System.err.println("Unexpected error processing frame: " + e.getMessage());
+                }
             }
         }
     }
@@ -578,9 +731,13 @@ public class VideoPlayerModel {
         if (intFrameRate > 0 && frame.frameNumber() % intFrameRate == 0) {
             long remainingUs = (frame.targetTimeNs() - frame.preparedAtNs()) / 1_000L;
             if (remainingUs < 0) {
-                System.out.printf("Frame headroom is \u001B[31m%5dus\u001B[0m out of %dus spare.%n", remainingUs, videoFrameDurationUs);
+                System.out.printf(
+                        "Frame headroom is \u001B[31m%5dus\u001B[0m out of %dus spare.%n",
+                        remainingUs, videoFrameDurationUs);
             } else {
-                System.out.printf("Frame headroom is \u001B[32m%5dus\u001B[0m out of %dus spare.%n", remainingUs, videoFrameDurationUs);
+                System.out.printf(
+                        "Frame headroom is \u001B[32m%5dus\u001B[0m out of %dus spare.%n",
+                        remainingUs, videoFrameDurationUs);
             }
         }
 
@@ -645,7 +802,7 @@ public class VideoPlayerModel {
     }
 
     private void handlePlaybackError(Exception e) {
-        e.printStackTrace();
+        System.err.println("Playback error: " + e.getMessage());
         closePlaybackResources();
         pauseRequested = false;
         notifyStatusChanged("Error: " + e.getMessage());
@@ -658,9 +815,16 @@ public class VideoPlayerModel {
         preparedFrame = null;
 
         clearPipelineQueue();
+        synchronized (demuxerSignal) {
+            demuxerSignal.notifyAll();
+        }
 
         if (demuxerThread != null) {
             demuxerThread.interrupt();
+            try {
+                demuxerThread.join(500);
+            } catch (InterruptedException ignored) {
+            }
             demuxerThread = null;
         }
 
@@ -782,11 +946,34 @@ public class VideoPlayerModel {
         audioOutputStateChangedHandler.accept(audioOutputEnabled);
     }
 
-    private record PreparedFrame(Image image, int frameNumber, long mediaTimestampUs, long logicalTimestampUs,
-                                 long targetTimeNs, long preparedAtNs) {
+    private record PreparedFrame(
+            Image image,
+            int frameNumber,
+            long mediaTimestampUs,
+            long logicalTimestampUs,
+            long targetTimeNs,
+            long preparedAtNs,
+            long relativeTimestampUs) {
+
+        PreparedFrame(
+                Image image,
+                int frameNumber,
+                long mediaTimestampUs,
+                long logicalTimestampUs,
+                long targetTimeNs,
+                long preparedAtNs) {
+            this(image, frameNumber, mediaTimestampUs, logicalTimestampUs, targetTimeNs, preparedAtNs, 0L);
+        }
     }
 
-    private record EpochFuture(long epoch, CompletableFuture<PreparedFrame> future) {
+    private record EpochFuture(long epoch, CompletableFuture<PreparedFrame> future, boolean isEof) {
+        EpochFuture(long epoch, CompletableFuture<PreparedFrame> future) {
+            this(epoch, future, false);
+        }
+
+        static EpochFuture eof(long epoch) {
+            return new EpochFuture(epoch, CompletableFuture.completedFuture(null), true);
+        }
     }
 
     private static class PendingAudio {
