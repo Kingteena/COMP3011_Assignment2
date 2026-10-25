@@ -4,7 +4,7 @@
  * 
  * Authors:
  *   1. Simon Ratcliffe, in collaboration with GPT-5.6 Terra
- *   2. <student name and student number insert here upon modification>
+ *   2. Vihara Girihagama, in collaboration with Gemini-3.8 Flash
  *
  * Copyright 2026 Simon Ratcliffe
  */
@@ -33,8 +33,11 @@ public class FrameJitterer extends FrameProcessor {
 
     private final int instanceIndex;
     private int mediaSeed;
-    private byte[] sourcePixels;
     private byte[] blackRow;
+
+    // Thread-local scratch buffers
+    // Holding these per worker thread eliminates data races while avoiding expensive per-frame array allocations.
+    private final ThreadLocal<byte[]> sourcePixelsHolder = new ThreadLocal<>();
 
     public FrameJitterer() {
         super();
@@ -46,9 +49,7 @@ public class FrameJitterer extends FrameProcessor {
         super.initialise(videoInfo);
         mediaSeed = saltedMediaSeed(videoInfo.mediaName(), instanceIndex + SEED_SALT);
 
-        int frameBytes = videoInfo.imageStride() * videoInfo.imageHeight();
         int widthBytes = videoInfo.imageWidth() * videoInfo.imageChannels();
-        sourcePixels = new byte[frameBytes];
         blackRow = new byte[widthBytes];
     }
 
@@ -129,6 +130,12 @@ public class FrameJitterer extends FrameProcessor {
         int stride = videoInfo.imageStride();
         int frameBytes = stride * height;
         int widthBytes = width * channels;
+
+        byte[] sourcePixels = sourcePixelsHolder.get();
+        if (sourcePixels == null || sourcePixels.length < frameBytes) {
+            sourcePixels = new byte[frameBytes];
+            sourcePixelsHolder.set(sourcePixels);
+        }
 
         ByteBuffer source = pixels.duplicate();
         source.clear();
