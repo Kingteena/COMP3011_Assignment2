@@ -384,6 +384,81 @@ public class CommandLineControllerTest {
     }
 
     @Test
+    @DisplayName("Verify TITAN T11-T16: options combined with -h or invalid args produce non-zero exit code")
+    void testHelpCombinedWithInvalidArgsExitsNonZero() {
+        // T11: Processor option + help without video file
+        CommandLineController c1 =
+                new CommandLineController(new String[]{"--number-frames", "-h"});
+        assertEquals(1, c1.getExitCode());
+        assertEquals("No video file specified.", c1.getErrorMessage());
+        assertFalse(c1.shouldLaunchApplication());
+
+        // T12: Illegal long option with video file and --help
+        CommandLineController c2 =
+                new CommandLineController(
+                        new String[]{"--illegal-argument", validVideoFile.getAbsolutePath(), "--help"});
+        assertEquals(1, c2.getExitCode());
+        assertEquals("Unknown option: --illegal-argument", c2.getErrorMessage());
+        assertFalse(c2.shouldLaunchApplication());
+
+        // T13: Multiple video files with -h
+        CommandLineController c3 =
+                new CommandLineController(
+                        new String[]{validVideoFile.getAbsolutePath(), validVideoFile.getAbsolutePath(), "-h"});
+        assertEquals(1, c3.getExitCode());
+        assertEquals("Usage: VideoPlayer [options] [video-file]", c3.getErrorMessage());
+        assertFalse(c3.shouldLaunchApplication());
+
+        // T14: -h with video file and miscapitalized option
+        CommandLineController c4 =
+                new CommandLineController(
+                        new String[]{"-h", validVideoFile.getAbsolutePath(), "--Flicker-frames"});
+        assertEquals(1, c4.getExitCode());
+        assertEquals("Unknown option: --Flicker-frames", c4.getErrorMessage());
+        assertFalse(c4.shouldLaunchApplication());
+
+        // T15/T16: Stacked options with invalid character and --help
+        CommandLineController c5 =
+                new CommandLineController(
+                        new String[]{"-sfbnz", validVideoFile.getAbsolutePath(), "--help"});
+        assertEquals(1, c5.getExitCode());
+        assertEquals("Unknown option: -sfbnz", c5.getErrorMessage());
+        assertFalse(c5.shouldLaunchApplication());
+    }
+
+    @Test
+    @DisplayName("Verify illegal argument (e.g. --illegal-argument) prints error and usage, and stops cleanly with exit code 1")
+    void testIllegalArgumentPrintsUsageAndExitsCleanly() {
+        CommandLineController controller =
+                new CommandLineController(new String[]{"--illegal-argument", validVideoFile.getAbsolutePath()});
+
+        assertEquals(1, controller.getExitCode(), "Exit code must be 1 on illegal argument");
+        assertEquals("Unknown option: --illegal-argument", controller.getErrorMessage());
+        assertFalse(controller.shouldLaunchApplication(), "Application must not launch on illegal argument");
+
+        String output = getNormalizedOutput();
+        assertTrue(output.contains("Unknown option: --illegal-argument"),
+                "Output must report the unknown option error");
+        assertTrue(output.contains("Usage: VideoPlayer [options] [video-file]"),
+                "Output must print the usage message on illegal argument");
+    }
+
+    @Test
+    @DisplayName("Verify standalone illegal argument (--illegal-argument) prints error, usage, and does not launch")
+    void testStandaloneIllegalArgumentPrintsUsage() {
+        CommandLineController controller =
+                new CommandLineController(new String[]{"--illegal-argument"});
+
+        assertEquals(1, controller.getExitCode());
+        assertEquals("Unknown option: --illegal-argument", controller.getErrorMessage());
+        assertFalse(controller.shouldLaunchApplication());
+
+        String output = getNormalizedOutput();
+        assertTrue(output.contains("Unknown option: --illegal-argument"));
+        assertTrue(output.contains("Usage: VideoPlayer [options] [video-file]"));
+    }
+
+    @Test
     @DisplayName("Verify error when non-existent video file is specified")
     void testNonExistentVideoFile() {
         File missing = new File(tempDir, "non_existent_movie.mp4");
