@@ -51,6 +51,8 @@ public class VideoPlayerApp extends Application {
     public void start(Stage stage) {
         this.stage = stage;
 
+        // Injecting frame processors parsed by CommandLineController into the controller/model
+        // decouples CLI argument parsing from playback execution (Dependency Injection / Single Responsibility).
         controller =
                 new VideoPlayerController(
                         commandLineController.isAudioRequested(),

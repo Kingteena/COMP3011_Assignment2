@@ -35,8 +35,10 @@ public class FrameJitterer extends FrameProcessor {
     private int mediaSeed;
     private byte[] blackRow;
 
-    // Thread-local scratch buffers
-    // Holding these per worker thread eliminates data races while avoiding expensive per-frame array allocations.
+    // Holding sourcePixels in a ThreadLocal eliminates data races because jitterFrame() mutates
+    // the byte array while copying pixels, while avoiding expensive per-frame array allocations.
+    // In contrast, blackRow is safe as a shared field because it is populated with constant zeros
+    // once during initialise() and thereafter accessed in a strictly read-only fashion by all worker threads.
     private final ThreadLocal<byte[]> sourcePixelsHolder = new ThreadLocal<>();
 
     public FrameJitterer() {

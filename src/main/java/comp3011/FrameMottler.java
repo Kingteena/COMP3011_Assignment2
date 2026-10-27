@@ -66,8 +66,10 @@ public class FrameMottler extends FrameProcessor {
     private double minimumScale;
     private double maximumScale;
 
-    // Thread-local scratch buffers
-    // Holding these per worker thread eliminates data races while avoiding expensive per-frame array allocations.
+    // Isolating DamageMaskCache in a ThreadLocal ensures each worker thread maintains its own
+    // 72-frame segment noise grids (maskA, maskB). When worker threads process frames out of order
+    // across segment boundaries, per-thread caches prevent concurrent segment updates from corrupting
+    // or overwriting intermediate smoothing grids.
     private static class DamageMaskCache {
         int segment = Integer.MIN_VALUE;
         double[] maskA;
@@ -281,6 +283,8 @@ public class FrameMottler extends FrameProcessor {
         int width = videoInfo.imageWidth();
         int channels = videoInfo.imageChannels();
         int stride = videoInfo.imageStride();
+        // Allocating scale indices as a stack-local array replaces the starter code's mutable instance
+        // fields (blockBlueScaleIndex, etc.), eliminating intra-frame 4x4 block staining race conditions.
         int[] scaleIndices = new int[3];
 
         for (int blockY = 0; blockY < height; blockY += EFFECT_BLOCK_SIZE) {

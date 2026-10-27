@@ -34,12 +34,15 @@ public class CommandLineController {
     private String errorMessage;
 
     public CommandLineController(String[] args) {
+        // Defensive copy of the input array prevents external callers from mutating parsed arguments.
         this.args = args.clone();
         parse();
         if (errorMessage != null) {
             System.out.println(errorMessage);
-        }
-        if (helpRequested) {
+            if (!errorMessage.startsWith("Usage:")) {
+                printUsage();
+            }
+        } else if (helpRequested) {
             printHelp();
         }
     }
@@ -69,6 +72,7 @@ public class CommandLineController {
     }
 
     public List<FrameProcessor> getFrameProcessors() {
+        // Returning an unmodifiable view guarantees the parsed CLI filter sequence cannot be mutated.
         return Collections.unmodifiableList(frameProcessors);
     }
 
@@ -81,6 +85,7 @@ public class CommandLineController {
     }
 
     public boolean shouldLaunchApplication() {
+        // Suppress GUI launch when help is requested, even if a valid video file was provided on the CLI.
         return errorMessage == null && videoFile != null && !helpRequested;
     }
 
@@ -114,7 +119,7 @@ public class CommandLineController {
                 videoFile = null;
             }
         } else {
-            if (!helpRequested) {
+            if (!helpRequested || !frameProcessors.isEmpty() || audioRequested || maximiseRequested || displayId != null) {
                 errorMessage = "No video file specified.";
             }
         }
@@ -129,6 +134,8 @@ public class CommandLineController {
             case "monitor-1" -> setDisplayId(1);
             case "monitor-2" -> setDisplayId(2);
             default -> {
+                // Processor instantiation is delegated to FrameProcessorFactory (Open-Closed Principle),
+                // keeping CLI syntax parsing decoupled from concrete effect implementations.
                 Optional<FrameProcessor> processor = FrameProcessorFactory.create(opt);
                 if (processor.isPresent()) {
                     frameProcessors.add(processor.get());
@@ -149,6 +156,7 @@ public class CommandLineController {
                 case '1' -> setDisplayId(1);
                 case '2' -> setDisplayId(2);
                 default -> {
+                    // Delegated to FrameProcessorFactory to decouple CLI parsing from effect classes.
                     Optional<FrameProcessor> processor = FrameProcessorFactory.create(c);
                     if (processor.isPresent()) {
                         frameProcessors.add(processor.get());
@@ -164,8 +172,12 @@ public class CommandLineController {
         }
     }
 
-    private void printHelp() {
+    public void printUsage() {
         System.out.println("Usage: VideoPlayer [options] [video-file]");
+    }
+
+    private void printHelp() {
+        printUsage();
         System.out.println();
         System.out.println("Options:");
         System.out.println("  -h, --help         Show this help message");

@@ -1,7 +1,7 @@
 /*
  * Starter code supplied for Adelaide University COMP3011 Assignment 2.
  * Students are free to modify this file for assessment purposes.
- * 
+ *
  * Authors:
  *   1. Simon Ratcliffe, in collaboration with GPT-5.6 Terra
  *   2. <student name and student number insert here upon modification>
@@ -10,15 +10,14 @@
  */
 package comp3011;
 
-import java.nio.Buffer;
-import java.nio.ShortBuffer;
+import org.bytedeco.javacv.Frame;
 
 import javax.sound.sampled.AudioFormat;
 import javax.sound.sampled.AudioSystem;
 import javax.sound.sampled.LineUnavailableException;
 import javax.sound.sampled.SourceDataLine;
-
-import org.bytedeco.javacv.Frame;
+import java.nio.Buffer;
+import java.nio.ShortBuffer;
 
 /**
  * Streams decoded audio from JavaCV frames to the Java Sound output device, in support of the video player being able

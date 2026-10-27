@@ -31,6 +31,9 @@ import java.util.function.Supplier;
  */
 public final class FrameProcessorFactory {
 
+    // Supplier references are stored instead of pre-instantiated singletons so repeated flags
+    // (e.g. -ss) instantiate distinct processor instances. This is essential for stateful processors
+    // such as FrameScratcher, which generate unique random seeds per instance in their constructor.
     private static final Map<Character, Supplier<FrameProcessor>> SHORT_MAP = new HashMap<>();
     private static final Map<String, Supplier<FrameProcessor>> LONG_MAP = new HashMap<>();
 

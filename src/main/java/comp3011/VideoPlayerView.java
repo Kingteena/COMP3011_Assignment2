@@ -1,7 +1,7 @@
 /*
  * Starter code supplied for Adelaide University COMP3011 Assignment 2.
  * Students are free to modify this file for assessment purposes.
- * 
+ *
  * Authors:
  *   1. Simon Ratcliffe, in collaboration with GPT-5.6 Terra
  *   2. <student name and student number insert here upon modification>
@@ -244,13 +244,13 @@ public class VideoPlayerView {
         SVGPath loop = new SVGPath();
         loop.setContent(clockwise
                 ? "M 10 6 "
-                        + "C 7 7.5 5 10.5 5 14 "
-                        + "C 5 19 9 23 14 23 "
-                        + "C 19 23 23 19 23 14 " // ~3/4 circle bezier curve empty top right
+                + "C 7 7.5 5 10.5 5 14 "
+                + "C 5 19 9 23 14 23 "
+                + "C 19 23 23 19 23 14 " // ~3/4 circle bezier curve empty top right
                 : "M 5 14 "
-                        + "C 5 19 9 23 14 23 "
-                        + "C 19 23 23 19 23 14 "
-                        + "C 23 10.5 21 7.5 18 6"); // ~3/4 circle bezier curve empty top right
+                + "C 5 19 9 23 14 23 "
+                + "C 19 23 23 19 23 14 "
+                + "C 23 10.5 21 7.5 18 6"); // ~3/4 circle bezier curve empty top right
         loop.setFill(null);
         loop.setStroke(Color.BLACK);
         loop.setStrokeWidth(2.25);
@@ -293,8 +293,8 @@ public class VideoPlayerView {
         GraphicsContext gc = canvas.getGraphicsContext2D();
         gc.setFill(Color.BLACK);
         gc.fillPolygon(
-                new double[] { 10, 10, 21 },
-                new double[] { 7, 21, 14 },
+                new double[]{10, 10, 21},
+                new double[]{7, 21, 14},
                 3);
         return canvas;
     }

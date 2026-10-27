@@ -1,7 +1,7 @@
 /*
  * Starter code supplied for Adelaide University COMP3011 Assignment 2.
  * Students are free to modify this file for assessment purposes.
- * 
+ *
  * Authors:
  *   1. Simon Ratcliffe, in collaboration with GPT-5.6 Terra
  *   2. Vihara Girihagama, in collaboration with Gemini-3.8 Flash
@@ -10,9 +10,9 @@
  */
 package comp3011;
 
-import java.nio.ByteBuffer;
-
 import org.bytedeco.javacv.Frame;
+
+import java.nio.ByteBuffer;
 
 /**
  * Simulates bright light bleeding into nearby pixels, with a warm colour bias.
@@ -33,31 +33,13 @@ public class FrameBleeder extends FrameProcessor {
     private static final double RED_BLEED_STRENGTH = 105.0;
     private static final double GREEN_BLEED_STRENGTH = 62.0;
     private static final double BLUE_BLEED_STRENGTH = 18.0;
-
+    private final ThreadLocal<BleedScratch> scratchHolder = new ThreadLocal<>();
     private int maskWidth;
     private int maskHeight;
     private int[] xMaskLeft;
     private double[] xMaskBlend;
     private int[] yMaskTop;
     private double[] yMaskBlend;
-
-    // Thread-local scratch buffers
-    // Holding these per worker thread eliminates data races while avoiding expensive per-frame array allocations.
-    private static class BleedScratch {
-        final double[] brightMask;
-        final double[] horizontalBlurMask;
-        final double[] blurredMask;
-        final int size;
-
-        BleedScratch(int size) {
-            this.size = size;
-            this.brightMask = new double[size];
-            this.horizontalBlurMask = new double[size];
-            this.blurredMask = new double[size];
-        }
-    }
-
-    private final ThreadLocal<BleedScratch> scratchHolder = new ThreadLocal<>();
 
     public FrameBleeder() {
         super();
@@ -273,5 +255,22 @@ public class FrameBleeder extends FrameProcessor {
 
     private double lerp(double a, double b, double blend) {
         return a + (b - a) * blend;
+    }
+
+    // BleedScratch encapsulates brightMask, horizontalBlurMask, and blurredMask inside a per-worker
+    // ThreadLocal so multi-pass horizontal and vertical box-blur operations execute concurrently
+    // without interleaving or buffer corruption, while reusing masks across frames to eliminate GC heap thrashing.
+    private static class BleedScratch {
+        final double[] brightMask;
+        final double[] horizontalBlurMask;
+        final double[] blurredMask;
+        final int size;
+
+        BleedScratch(int size) {
+            this.size = size;
+            this.brightMask = new double[size];
+            this.horizontalBlurMask = new double[size];
+            this.blurredMask = new double[size];
+        }
     }
 }
