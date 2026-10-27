@@ -59,10 +59,6 @@ public class VideoPlayerModel {
             new LinkedBlockingQueue<>(PIPELINE_QUEUE_CAPACITY);
     private final ThreadLocal<JavaFXFrameConverter> workerConverters =
             ThreadLocal.withInitial(JavaFXFrameConverter::new);
-
-    private ThreadPoolExecutor workerPool;
-    private Thread demuxerThread;
-
     private final AnimationTimer playbackTimer =
             new AnimationTimer() {
                 @Override
@@ -70,7 +66,8 @@ public class VideoPlayerModel {
                     pumpPlayback(now);
                 }
             };
-
+    private ThreadPoolExecutor workerPool;
+    private Thread demuxerThread;
     private File videoFile;
     private FFmpegFrameGrabber grabber;
     private JavaFXFrameConverter converter; // Used in single-threaded fallback mode
