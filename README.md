@@ -1,6 +1,9 @@
 # COMP3011 High-Performance Video Player
 
-A thread-safe, pipelined, multi-threaded video playback engine built with JavaFX and FFmpeg (JavaCV) for Adelaide University COMP3011 Assignment 2.
+This submission is for Assignment 2 of COMP3011 Cloud and Concurrent Programming by Vihara Girihagama (a1930250). 
+It can be found at [this GitHub repository](https://github.com/Kingteena/COMP3011_Assignment2)
+
+It implements a thread-safe, pipelined, multithreaded video playback engine built with JavaFX and FFmpeg (JavaCV).
 
 ---
 
@@ -21,7 +24,7 @@ Command-line parsing and effect instantiation are decoupled across two classes t
 
 In the supplied single-threaded player, demuxing, decoding, multi-pass pixel filtering, and JavaFX image conversion all executed cooperatively on the JavaFX Application Thread. Stacking heavy effects (`FrameMottler`, `FrameBleeder`, `FramePepperer`) on HD media quickly exceeded the 24 fps frame budget (`41,666 us`), causing negative frame headroom, audio stalls, and unresponsive window resizing.
 
-To maximize multi-core throughput while preserving 100% bit-exact frame accuracy and responsive UI controls, `VideoPlayerModel` implements a Demuxer + Worker Pool + Bounded Ordered Future Queue architecture:
+To maximise multicore throughput while preserving 100% bit-exact frame accuracy and responsive UI controls, `VideoPlayerModel` implements a Demuxer + Worker Pool + Bounded Ordered Future Queue architecture:
 
 ```
 [FFmpeg Demuxer Thread] (VideoPlayer-Demuxer)
@@ -68,7 +71,7 @@ An alternative architecture often considered for video processing is a **Staged 
 
 1.  **Slowest-Stage Bottleneck (Throughput Throttling)**: In a staged pipeline, the overall throughput cannot exceed the rate of the single slowest stage (e.g. `FrameBleeder`). Faster stages (`FrameFlickerer`, `FrameYellower`) finish early and starve or block, leaving CPU cores idle regardless of how many cores are provisioned.
 2.  **Dynamic Workload Imbalance**: Processing time per filter varies across frames based on visual contents (e.g., number of bright pixels in `FrameBleeder`, particle counts in `FramePepperer`). Staged pipelines cannot redistribute idle CPU capacity between stages to absorb transient spikes.
-3.  **Queue Synchronization & Cache Overhead**: Chaining 11+ intermediate blocking queues introduces massive thread context switching, thread synchronization latency, and CPU cache invalidations as frame data bounces between cores.
+3.  **Queue synchronisation & Cache Overhead**: Chaining 11+ intermediate blocking queues introduces massive thread context switching, thread synchronisation latency, and CPU cache invalidations as frame data bounces between cores.
 
 In contrast, our **Worker Pool + Bounded Ordered Queue** architecture assigns the *entire* filter chain of an individual frame to an available worker thread:
 
@@ -86,7 +89,7 @@ The underlying native `FFmpegFrameGrabber` is not thread-safe. All grabber invoc
 
 ### Thread-Safe Audio Scheduling (`pendingAudio`)
 
-Audio demuxing runs asynchronously on the demuxer thread while audio buffer submission runs synchronously on the JavaFX rendering thread inside `writeDueAudio(now)`. The `pendingAudio` queue is strictly synchronized to prevent packet corruption during playback, volume/mute toggles, or seek flushes.
+Audio demuxing runs asynchronously on the demuxer thread while audio buffer submission runs synchronously on the JavaFX rendering thread inside `writeDueAudio(now)`. The `pendingAudio` queue is strictly synchronised to prevent packet corruption during playback, volume/mute toggles, or seek flushes.
 
 ### Epoch-Based Rapid-Seek Invalidation
 
@@ -158,10 +161,10 @@ Observed Concurrency Speedup: 3.38x faster
 ================================================================================
 ```
 
-#### Real-Time 24fps Playback Budget Analysis (41.67 ms/frame)
+#### Real Time 24fps Playback Budget Analysis (41.67 ms/frame)
 
--   **Single-Threaded Bottleneck**: Under 720p HD resolution with a heavy 26-processor filter chain (`-nssnfwyvdjmbpnssnfwyvdjmbp`), single-threaded processing consumes **40.58 ms/frame** on average, leaving virtually 0 ms of spare headroom. On complex frames, it breaches the 41.67 ms budget, resulting in frame stutter.
--   **Multi-Threaded Headroom**: The multi-threaded worker pipeline processes frames in **12.00 ms/frame** (**83.28 fps**), providing over **29 ms of spare headroom per frame** within the 41.67 ms budget. This achieves a **3.38x concurrency speedup** on multi-core processors with zero late frames.
+-   **Single threaded Bottleneck**: Under 720p HD resolution with a heavy 26-processor filter chain (`-nssnfwyvdjmbpnssnfwyvdjmbp`), single-threaded processing consumes **40.58 ms/frame** on average, leaving virtually 0 ms of spare headroom. On complex frames, it breaches the 41.67 ms budget, resulting in frame stutter.
+-   **Multithreaded Headroom**: The multithreaded worker pipeline processes frames in **12.00 ms/frame** (**83.28 fps**), providing over **29 ms of spare headroom per frame** within the 41.67 ms budget. This achieves a **3.38x concurrency speedup** on multi-core processors with zero late frames.
 
 ---
 
