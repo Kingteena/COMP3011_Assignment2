@@ -384,46 +384,61 @@ public class CommandLineControllerTest {
     }
 
     @Test
-    @DisplayName("Verify TITAN T11-T16: options combined with -h or invalid args produce non-zero exit code")
+    @DisplayName("Verify TITAN T11-T16: options combined with -h or invalid args produce non-zero exit code and full help text")
     void testHelpCombinedWithInvalidArgsExitsNonZero() {
         // T11: Processor option + help without video file
+        capturedOut.reset();
         CommandLineController c1 =
                 new CommandLineController(new String[]{"--number-frames", "-h"});
         assertEquals(1, c1.getExitCode());
         assertEquals("No video file specified.", c1.getErrorMessage());
         assertFalse(c1.shouldLaunchApplication());
+        assertTrue(getNormalizedOutput().contains("No video file specified."));
+        assertTrue(getNormalizedOutput().contains("Frame processors are applied in command-line order"));
 
         // T12: Illegal long option with video file and --help
+        capturedOut.reset();
         CommandLineController c2 =
                 new CommandLineController(
                         new String[]{"--illegal-argument", validVideoFile.getAbsolutePath(), "--help"});
         assertEquals(1, c2.getExitCode());
         assertEquals("Unknown option: --illegal-argument", c2.getErrorMessage());
         assertFalse(c2.shouldLaunchApplication());
+        assertTrue(getNormalizedOutput().contains("Unknown option: --illegal-argument"));
+        assertTrue(getNormalizedOutput().contains("Frame processors are applied in command-line order"));
 
         // T13: Multiple video files with -h
+        capturedOut.reset();
         CommandLineController c3 =
                 new CommandLineController(
                         new String[]{validVideoFile.getAbsolutePath(), validVideoFile.getAbsolutePath(), "-h"});
         assertEquals(1, c3.getExitCode());
         assertEquals("Usage: VideoPlayer [options] [video-file]", c3.getErrorMessage());
         assertFalse(c3.shouldLaunchApplication());
+        assertTrue(getNormalizedOutput().contains("Usage: VideoPlayer [options] [video-file]"));
+        assertTrue(getNormalizedOutput().contains("Frame processors are applied in command-line order"));
 
         // T14: -h with video file and miscapitalized option
+        capturedOut.reset();
         CommandLineController c4 =
                 new CommandLineController(
                         new String[]{"-h", validVideoFile.getAbsolutePath(), "--Flicker-frames"});
         assertEquals(1, c4.getExitCode());
         assertEquals("Unknown option: --Flicker-frames", c4.getErrorMessage());
         assertFalse(c4.shouldLaunchApplication());
+        assertTrue(getNormalizedOutput().contains("Unknown option: --Flicker-frames"));
+        assertTrue(getNormalizedOutput().contains("Frame processors are applied in command-line order"));
 
         // T15/T16: Stacked options with invalid character and --help
+        capturedOut.reset();
         CommandLineController c5 =
                 new CommandLineController(
                         new String[]{"-sfbnz", validVideoFile.getAbsolutePath(), "--help"});
         assertEquals(1, c5.getExitCode());
         assertEquals("Unknown option: -sfbnz", c5.getErrorMessage());
         assertFalse(c5.shouldLaunchApplication());
+        assertTrue(getNormalizedOutput().contains("Unknown option: -sfbnz"));
+        assertTrue(getNormalizedOutput().contains("Frame processors are applied in command-line order"));
     }
 
     @Test

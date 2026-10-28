@@ -19,9 +19,9 @@ import java.nio.ByteBuffer;
  * This one is expensive in CPU time!
  *
  * <p>
- * For each frame, {@link #buildBrightMask(ByteBuffer, double[])} identifies bright
+ * For each frame, {@link #buildBrightMask(byte[], double[])} identifies bright
  * regions, {@link #blurBrightMask(double[], double[], double[])} spreads their influence, and
- * {@link #applyBleed(ByteBuffer, double[])} adds the resulting coloured glow.
+ * {@link #applyBleed(byte[], double[])} adds the resulting coloured glow.
  * </p>
  */
 public class FrameBleeder extends FrameProcessor {
@@ -72,16 +72,25 @@ public class FrameBleeder extends FrameProcessor {
             throw new Exception("FrameBleeder requires at least three image channels");
         }
 
+        int frameBytes = videoInfo.imageStride() * videoInfo.imageHeight();
         int maskSize = maskWidth * maskHeight;
         BleedScratch scratch = scratchHolder.get();
         if (scratch == null || scratch.size < maskSize) {
             scratch = new BleedScratch(maskSize);
             scratchHolder.set(scratch);
         }
+        scratch.ensureFrameCapacity(frameBytes);
 
-        buildBrightMask(pixels, scratch.brightMask);
+        ByteBuffer dup = pixels.duplicate();
+        dup.clear();
+        dup.get(scratch.pixelBytes, 0, frameBytes);
+
+        buildBrightMask(scratch.pixelBytes, scratch.brightMask);
         blurBrightMask(scratch.brightMask, scratch.horizontalBlurMask, scratch.blurredMask);
-        applyBleed(pixels, scratch.blurredMask);
+        applyBleed(scratch.pixelBytes, scratch.blurredMask);
+
+        dup.clear();
+        dup.put(scratch.pixelBytes, 0, frameBytes);
     }
 
     private void buildSamplingLookups() {
@@ -118,7 +127,7 @@ public class FrameBleeder extends FrameProcessor {
         }
     }
 
-    private void buildBrightMask(ByteBuffer pixels, double[] brightMask) {
+    private void buildBrightMask(byte[] pixels, double[] brightMask) {
         int width = videoInfo.imageWidth();
         int height = videoInfo.imageHeight();
         int channels = videoInfo.imageChannels();
@@ -138,9 +147,9 @@ public class FrameBleeder extends FrameProcessor {
                     for (int x = blockX; x < blockXEnd; x++) {
                         int base = rowStart + x * channels;
                         // JavaCV supplies these decoded frames in BGR byte order.
-                        int b = Byte.toUnsignedInt(pixels.get(base));
-                        int g = Byte.toUnsignedInt(pixels.get(base + 1));
-                        int r = Byte.toUnsignedInt(pixels.get(base + 2));
+                        int b = Byte.toUnsignedInt(pixels[base]);
+                        int g = Byte.toUnsignedInt(pixels[base + 1]);
+                        int r = Byte.toUnsignedInt(pixels[base + 2]);
                         int luminance = (54 * r + 183 * g + 19 * b) / 256;
                         maximumLuminance = Math.max(maximumLuminance, luminance);
                     }
@@ -200,7 +209,7 @@ public class FrameBleeder extends FrameProcessor {
         }
     }
 
-    private void applyBleed(ByteBuffer pixels, double[] blurredMask) {
+    private void applyBleed(byte[] pixels, double[] blurredMask) {
         int width = videoInfo.imageWidth();
         int height = videoInfo.imageHeight();
         int channels = videoInfo.imageChannels();
@@ -208,9 +217,29 @@ public class FrameBleeder extends FrameProcessor {
 
         for (int y = 0; y < height; y++) {
             int rowStart = y * stride;
+            int y0 = yMaskTop[y];
+            int y1 = Math.min(y0 + 1, maskHeight - 1);
+            double yBlend = yMaskBlend[y];
+            int row0 = y0 * maskWidth;
+            int row1 = y1 * maskWidth;
 
             for (int x = 0; x < width; x++) {
-                double bleedStrength = sampleBlurredMask(x, y, blurredMask);
+                int x0 = xMaskLeft[x];
+                int x1 = Math.min(x0 + 1, maskWidth - 1);
+                double m00 = blurredMask[row0 + x0];
+                double m01 = blurredMask[row0 + x1];
+                double m10 = blurredMask[row1 + x0];
+                double m11 = blurredMask[row1 + x1];
+
+                // Skip lerp math entirely if the mask region is unlit (evaluates strictly to 0.0)
+                if (m00 == 0.0 && m01 == 0.0 && m10 == 0.0 && m11 == 0.0) {
+                    continue;
+                }
+
+                double xBlend = xMaskBlend[x];
+                double top = lerp(m00, m01, xBlend);
+                double bottom = lerp(m10, m11, xBlend);
+                double bleedStrength = Math.min(1.0, lerp(top, bottom, yBlend) * BLEED_MASK_GAIN);
                 if (bleedStrength <= 0.0) {
                     continue;
                 }
@@ -220,9 +249,9 @@ public class FrameBleeder extends FrameProcessor {
                 int redBoost = (int) Math.round(bleedStrength * RED_BLEED_STRENGTH);
                 int base = rowStart + x * channels;
 
-                pixels.put(base, boostedByte(pixels.get(base), blueBoost));
-                pixels.put(base + 1, boostedByte(pixels.get(base + 1), greenBoost));
-                pixels.put(base + 2, boostedByte(pixels.get(base + 2), redBoost));
+                pixels[base] = boostedByte(pixels[base], blueBoost);
+                pixels[base + 1] = boostedByte(pixels[base + 1], greenBoost);
+                pixels[base + 2] = boostedByte(pixels[base + 2], redBoost);
             }
         }
     }
@@ -265,12 +294,19 @@ public class FrameBleeder extends FrameProcessor {
         final double[] horizontalBlurMask;
         final double[] blurredMask;
         final int size;
+        byte[] pixelBytes;
 
         BleedScratch(int size) {
             this.size = size;
             this.brightMask = new double[size];
             this.horizontalBlurMask = new double[size];
             this.blurredMask = new double[size];
+        }
+
+        void ensureFrameCapacity(int frameBytes) {
+            if (pixelBytes == null || pixelBytes.length < frameBytes) {
+                pixelBytes = new byte[frameBytes];
+            }
         }
     }
 }

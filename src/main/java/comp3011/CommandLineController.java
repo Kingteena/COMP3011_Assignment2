@@ -39,11 +39,11 @@ public class CommandLineController {
         parse();
         if (errorMessage != null) {
             System.out.println(errorMessage);
-            if (!errorMessage.startsWith("Usage:")) {
-                printUsage();
-            }
-        } else if (helpRequested) {
+        }
+        if (helpRequested) {
             printHelp();
+        } else if (errorMessage != null && !errorMessage.startsWith("Usage:")) {
+            printUsage();
         }
     }
 
@@ -65,7 +65,9 @@ public class CommandLineController {
 
     private void setDisplayId(int displayId) {
         if (this.displayId != null && this.displayId != displayId) {
-            errorMessage = "Only one display option can be used";
+            if (errorMessage == null) {
+                errorMessage = "Only one display option can be used";
+            }
             return;
         }
         this.displayId = displayId;
@@ -92,35 +94,36 @@ public class CommandLineController {
     private void parse() {
         List<String> videoFiles = new ArrayList<>();
         for (String arg : args) {
-            if (errorMessage != null) {
-                break;
-            }
             if (arg.startsWith("--")) {
                 parseLongOption(arg);
             } else if (arg.startsWith("-") && arg.length() > 1) {
                 parseShortOptions(arg);
             } else if (arg.startsWith("-")) {
-                errorMessage = "Unknown option: " + arg;
+                if (errorMessage == null) {
+                    errorMessage = "Unknown option: " + arg;
+                }
             } else {
                 videoFiles.add(arg);
             }
         }
 
-        if (errorMessage != null) {
-            return;
-        }
-
         if (videoFiles.size() > 1) {
-            errorMessage = "Usage: VideoPlayer [options] [video-file]";
+            if (errorMessage == null) {
+                errorMessage = "Usage: VideoPlayer [options] [video-file]";
+            }
         } else if (videoFiles.size() == 1) {
-            videoFile = new File(videoFiles.get(0));
+            videoFile = new File(videoFiles.getFirst());
             if (!videoFile.isFile()) {
-                errorMessage = "File not found: " + videoFile.getPath();
+                if (errorMessage == null) {
+                    errorMessage = "File not found: " + videoFile.getPath();
+                }
                 videoFile = null;
             }
         } else {
             if (!helpRequested || !frameProcessors.isEmpty() || audioRequested || maximiseRequested || displayId != null) {
-                errorMessage = "No video file specified.";
+                if (errorMessage == null) {
+                    errorMessage = "No video file specified.";
+                }
             }
         }
     }
@@ -139,7 +142,7 @@ public class CommandLineController {
                 Optional<FrameProcessor> processor = FrameProcessorFactory.create(opt);
                 if (processor.isPresent()) {
                     frameProcessors.add(processor.get());
-                } else {
+                } else if (errorMessage == null) {
                     errorMessage = "Unknown option: " + arg;
                 }
             }
@@ -160,14 +163,10 @@ public class CommandLineController {
                     Optional<FrameProcessor> processor = FrameProcessorFactory.create(c);
                     if (processor.isPresent()) {
                         frameProcessors.add(processor.get());
-                    } else {
+                    } else if (errorMessage == null) {
                         errorMessage = "Unknown option: " + arg;
-                        return;
                     }
                 }
-            }
-            if (errorMessage != null) {
-                return;
             }
         }
     }

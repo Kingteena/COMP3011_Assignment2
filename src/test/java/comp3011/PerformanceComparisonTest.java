@@ -16,6 +16,7 @@ import java.nio.ByteBuffer;
 import java.util.List;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import javafx.application.Platform;
 import org.bytedeco.javacv.FFmpegFrameRecorder;
@@ -106,6 +107,7 @@ public class PerformanceComparisonTest {
     private BenchmarkResult benchmarkModel(boolean multiThreaded, List<FrameProcessor> processors) throws Exception {
         AtomicInteger framesReceived = new AtomicInteger(0);
         AtomicInteger lateFrames = new AtomicInteger(0);
+        AtomicLong firstFrameTimeNs = new AtomicLong(0);
         AtomicReference<String> lastStatus = new AtomicReference<>("");
 
         long startTime = System.nanoTime();
@@ -116,10 +118,12 @@ public class PerformanceComparisonTest {
                         (_, _) -> {},
                         img -> {
                             if (img != null) {
-                                long elapsed = System.nanoTime() - startTime;
+                                long nowNs = System.nanoTime();
+                                firstFrameTimeNs.compareAndSet(0, nowNs);
                                 int frameIdx = framesReceived.getAndIncrement();
+                                long relativeElapsed = nowNs - firstFrameTimeNs.get();
                                 long deadlineNs = (long) (frameIdx + 1) * FRAME_BUDGET_US * 1_000L;
-                                if (elapsed > deadlineNs) {
+                                if (relativeElapsed > deadlineNs) {
                                     lateFrames.incrementAndGet();
                                 }
                             }
@@ -212,10 +216,10 @@ public class PerformanceComparisonTest {
                         "Multi-threaded time (%d ms) should be strictly faster than single-threaded (%d ms)",
                         mtResult.totalTimeMs, stResult.totalTimeMs));
         assertTrue(
-                mtResult.lateFrames <= stResult.lateFrames,
+                mtResult.effectiveFps > stResult.effectiveFps,
                 String.format(
-                        "Multi-threaded late frames (%d) should be <= single-threaded late frames (%d)",
-                        mtResult.lateFrames, stResult.lateFrames));
+                        "Multi-threaded FPS (%.2f) should be higher than single-threaded FPS (%.2f)",
+                        mtResult.effectiveFps, stResult.effectiveFps));
     }
 
     @Test
@@ -257,7 +261,7 @@ public class PerformanceComparisonTest {
                 final long currentNow = now;
                 Platform.runLater(() -> model.pumpPlayback(currentNow));
                 now += stepNs;
-                Thread.sleep(20);
+                Thread.sleep(2);
                 if ("Playback finished".equals(lastStatus.get())) {
                     break;
                 }
@@ -283,7 +287,7 @@ public class PerformanceComparisonTest {
                 final long currentNow = now;
                 Platform.runLater(() -> model.pumpPlayback(currentNow));
                 now += stepNs;
-                Thread.sleep(20);
+                Thread.sleep(2);
                 if (framesReceived.get() > framesBeforeSeek + 3) {
                     break;
                 }

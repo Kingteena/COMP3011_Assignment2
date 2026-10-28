@@ -12,6 +12,7 @@ package comp3011;
 
 import java.nio.ByteBuffer;
 import java.util.Random;
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.bytedeco.javacv.Frame;
 
@@ -23,7 +24,7 @@ import org.bytedeco.javacv.Frame;
  * <p>
  * Initialisation builds multi-scale noise fields and colour lookup tables.
  * {@link #process(Frame, InfoFrame)} samples those fields in image blocks and
- * applies the selected channel scales through {@link #applyMottleBlock(ByteBuffer, int, int, int, int, int, int, int, int, int)}.
+ * applies the selected channel scales through {@link #applyMottleBlock(byte[], int, int, int, int, int, int, int, int, int)}.
  * </p>
  */
 public class FrameMottler extends FrameProcessor {
@@ -66,18 +67,23 @@ public class FrameMottler extends FrameProcessor {
     private double minimumScale;
     private double maximumScale;
 
-    // Isolating DamageMaskCache in a ThreadLocal ensures each worker thread maintains its own
-    // 72-frame segment noise grids (maskA, maskB). When worker threads process frames out of order
-    // across segment boundaries, per-thread caches prevent concurrent segment updates from corrupting
-    // or overwriting intermediate smoothing grids.
-    private static class DamageMaskCache {
-        int segment = Integer.MIN_VALUE;
-        double[] maskA;
-        double[] maskB;
+    // Sharing segment masks via ConcurrentHashMap computes each 72-frame noise field once across all worker
+    // threads, eliminating 72-frame boundary spikes and automatically reusing segment + 1 (maskB) as maskA.
+    private final ConcurrentHashMap<Integer, double[]> damageMaskBySegment = new ConcurrentHashMap<>();
+
+    // ThreadLocal scratch structures eliminate per-frame heap allocations during noise field generation.
+    private static class MottleScratch {
+        final double[] scratch = new double[NOISE_GRID_WIDTH * NOISE_GRID_HEIGHT];
+        final double[] fineField = new double[NOISE_GRID_WIDTH * NOISE_GRID_HEIGHT];
+        final double[] mediumField = new double[NOISE_GRID_WIDTH * NOISE_GRID_HEIGHT];
+        final double[] largeField = new double[NOISE_GRID_WIDTH * NOISE_GRID_HEIGHT];
+        final double[] brightnessField = new double[NOISE_GRID_WIDTH * NOISE_GRID_HEIGHT];
+        final double[] stainField = new double[NOISE_GRID_WIDTH * NOISE_GRID_HEIGHT];
     }
 
-    private final ThreadLocal<DamageMaskCache> damageMaskCacheHolder =
-            ThreadLocal.withInitial(DamageMaskCache::new);
+    private final ThreadLocal<MottleScratch> scratchHolder =
+            ThreadLocal.withInitial(MottleScratch::new);
+    private final ThreadLocal<byte[]> pixelBytesHolder = new ThreadLocal<>();
 
     public FrameMottler() {
         super();
@@ -87,6 +93,7 @@ public class FrameMottler extends FrameProcessor {
     @Override
     public void initialise(InfoVideo videoInfo) throws Exception {
         super.initialise(videoInfo);
+        damageMaskBySegment.clear();
         mediaSeed = saltedMediaSeed(videoInfo.mediaName(), instanceIndex + SEED_SALT);
         buildSamplingLookups();
         buildScaleLookups();
@@ -110,19 +117,18 @@ public class FrameMottler extends FrameProcessor {
             throw new Exception("FrameMottler requires at least three image channels");
         }
 
-        double[] brightnessField = buildMultiScaleNoiseField(info.frameNumber(), BRIGHTNESS_FIELD_SALT);
-        double[] stainField = buildMultiScaleNoiseField(info.frameNumber(), STAIN_FIELD_SALT);
+        MottleScratch ms = scratchHolder.get();
+        buildMultiScaleNoiseField(info.frameNumber(), BRIGHTNESS_FIELD_SALT, ms.brightnessField);
+        buildMultiScaleNoiseField(info.frameNumber(), STAIN_FIELD_SALT, ms.stainField);
         int damageMaskSegment = info.frameNumber() / DAMAGE_MASK_BLEND_FRAMES;
         double damageMaskBlend = (info.frameNumber() % DAMAGE_MASK_BLEND_FRAMES) / (double) DAMAGE_MASK_BLEND_FRAMES;
 
-        DamageMaskCache cache = damageMaskCacheHolder.get();
-        if (cache.segment != damageMaskSegment) {
-            cache.segment = damageMaskSegment;
-            cache.maskA = buildNoiseField(damageMaskSegment, DAMAGE_MASK_SALT, DAMAGE_MASK_SMOOTHING_PASSES);
-            cache.maskB = buildNoiseField(damageMaskSegment + 1, DAMAGE_MASK_SALT, DAMAGE_MASK_SMOOTHING_PASSES);
-        }
+        double[] maskA = damageMaskBySegment.computeIfAbsent(
+                damageMaskSegment, s -> buildNoiseField(s, DAMAGE_MASK_SALT, DAMAGE_MASK_SMOOTHING_PASSES));
+        double[] maskB = damageMaskBySegment.computeIfAbsent(
+                damageMaskSegment + 1, s -> buildNoiseField(s, DAMAGE_MASK_SALT, DAMAGE_MASK_SMOOTHING_PASSES));
 
-        mottleFrame(pixels, brightnessField, stainField, damageMaskBlend, cache.maskA, cache.maskB);
+        mottleFrame(pixels, ms.brightnessField, ms.stainField, damageMaskBlend, maskA, maskB);
     }
 
     private void buildSamplingLookups() {
@@ -184,40 +190,49 @@ public class FrameMottler extends FrameProcessor {
         }
     }
 
-    private double[] buildMultiScaleNoiseField(int frameNumber, int fieldSalt) {
-        double[] fineField = buildNoiseField(frameNumber, fieldSalt ^ FINE_FIELD_SALT, FINE_SMOOTHING_PASSES);
-        double[] mediumField = buildNoiseField(frameNumber, fieldSalt ^ MEDIUM_FIELD_SALT, MEDIUM_SMOOTHING_PASSES);
-        double[] largeField = buildNoiseField(frameNumber, fieldSalt ^ LARGE_FIELD_SALT, LARGE_SMOOTHING_PASSES);
-        double[] field = new double[fineField.length];
+    private void buildMultiScaleNoiseField(int frameNumber, int fieldSalt, double[] destination) {
+        MottleScratch ms = scratchHolder.get();
+        fillNoiseField(ms.fineField, frameNumber, fieldSalt ^ FINE_FIELD_SALT, FINE_SMOOTHING_PASSES, ms.scratch);
+        fillNoiseField(ms.mediumField, frameNumber, fieldSalt ^ MEDIUM_FIELD_SALT, MEDIUM_SMOOTHING_PASSES, ms.scratch);
+        fillNoiseField(ms.largeField, frameNumber, fieldSalt ^ LARGE_FIELD_SALT, LARGE_SMOOTHING_PASSES, ms.scratch);
 
-        for (int i = 0; i < field.length; i++) {
-            field[i] = fineField[i] * FINE_MOTTLE_WEIGHT
-                    + mediumField[i] * MEDIUM_MOTTLE_WEIGHT
-                    + largeField[i] * LARGE_MOTTLE_WEIGHT;
+        for (int i = 0; i < destination.length; i++) {
+            destination[i] = ms.fineField[i] * FINE_MOTTLE_WEIGHT
+                    + ms.mediumField[i] * MEDIUM_MOTTLE_WEIGHT
+                    + ms.largeField[i] * LARGE_MOTTLE_WEIGHT;
         }
 
-        normaliseField(field);
-        return field;
+        normaliseField(destination);
     }
 
     private double[] buildNoiseField(int frameNumber, int fieldSalt, int smoothingPasses) {
         double[] field = new double[NOISE_GRID_WIDTH * NOISE_GRID_HEIGHT];
-        double[] scratch = new double[field.length];
+        double[] scratch = scratchHolder.get().scratch;
+        fillNoiseField(field, frameNumber, fieldSalt, smoothingPasses, scratch);
+        return field;
+    }
+
+    private void fillNoiseField(double[] destination, int frameNumber, int fieldSalt, int smoothingPasses, double[] scratch) {
         Random random = new Random(seedForField(frameNumber, fieldSalt));
 
-        for (int i = 0; i < field.length; i++) {
-            field[i] = random.nextDouble();
+        for (int i = 0; i < destination.length; i++) {
+            destination[i] = random.nextDouble();
         }
 
+        double[] current = destination;
+        double[] other = scratch;
         for (int pass = 0; pass < smoothingPasses; pass++) {
-            smoothField(field, scratch);
-            double[] swap = field;
-            field = scratch;
-            scratch = swap;
+            smoothField(current, other);
+            double[] swap = current;
+            current = other;
+            other = swap;
         }
 
-        normaliseField(field);
-        return field;
+        if (current != destination) {
+            System.arraycopy(current, 0, destination, 0, destination.length);
+        }
+
+        normaliseField(destination);
     }
 
     private long seedForField(int frameNumber, int fieldSalt) {
@@ -283,6 +298,18 @@ public class FrameMottler extends FrameProcessor {
         int width = videoInfo.imageWidth();
         int channels = videoInfo.imageChannels();
         int stride = videoInfo.imageStride();
+        int frameBytes = stride * height;
+
+        byte[] pixelBytes = pixelBytesHolder.get();
+        if (pixelBytes == null || pixelBytes.length < frameBytes) {
+            pixelBytes = new byte[frameBytes];
+            pixelBytesHolder.set(pixelBytes);
+        }
+
+        ByteBuffer dup = pixels.duplicate();
+        dup.clear();
+        dup.get(pixelBytes, 0, frameBytes);
+
         // Allocating scale indices as a stack-local array replaces the starter code's mutable instance
         // fields (blockBlueScaleIndex, etc.), eliminating intra-frame 4x4 block staining race conditions.
         int[] scaleIndices = new int[3];
@@ -308,7 +335,7 @@ public class FrameMottler extends FrameProcessor {
                 }
 
                 applyMottleBlock(
-                        pixels,
+                        pixelBytes,
                         blockX,
                         blockXEnd,
                         blockY,
@@ -320,6 +347,9 @@ public class FrameMottler extends FrameProcessor {
                         scaleIndices[2]);
             }
         }
+
+        dup.clear();
+        dup.put(pixelBytes, 0, frameBytes);
     }
 
     private boolean prepareScaleIndicesForBlock(
@@ -386,7 +416,7 @@ public class FrameMottler extends FrameProcessor {
     }
 
     private void applyMottleBlock(
-            ByteBuffer pixels,
+            byte[] pixels,
             int blockX,
             int blockXEnd,
             int blockY,
@@ -406,9 +436,9 @@ public class FrameMottler extends FrameProcessor {
                 int base = rowStart + x * channels;
 
                 // JavaCV supplies these decoded frames in BGR byte order.
-                pixels.put(base, blueLookup[Byte.toUnsignedInt(pixels.get(base))]);
-                pixels.put(base + 1, greenLookup[Byte.toUnsignedInt(pixels.get(base + 1))]);
-                pixels.put(base + 2, redLookup[Byte.toUnsignedInt(pixels.get(base + 2))]);
+                pixels[base] = blueLookup[Byte.toUnsignedInt(pixels[base])];
+                pixels[base + 1] = greenLookup[Byte.toUnsignedInt(pixels[base + 1])];
+                pixels[base + 2] = redLookup[Byte.toUnsignedInt(pixels[base + 2])];
             }
         }
     }

@@ -143,11 +143,12 @@ public class FrameJitterer extends FrameProcessor {
         source.clear();
         source.get(sourcePixels, 0, frameBytes);
 
+        // Reuse a single duplicate buffer view across all rows to avoid thousands of per-frame buffer allocations
+        ByteBuffer destination = pixels.duplicate();
         for (int y = 0; y < height; y++) {
-            ByteBuffer destinationRow = pixels.duplicate();
-            destinationRow.clear();
-            destinationRow.position(y * stride);
-            destinationRow.put(blackRow, 0, widthBytes);
+            destination.clear();
+            destination.position(y * stride);
+            destination.put(blackRow, 0, widthBytes);
         }
 
         int sourceYStart = Math.max(0, -yOffset);
@@ -166,7 +167,6 @@ public class FrameJitterer extends FrameProcessor {
             int sourceIndex = (sourceYStart + row) * stride + sourceXByteStart;
             int destinationIndex = (destinationYStart + row) * stride + destinationXByteStart;
 
-            ByteBuffer destination = pixels.duplicate();
             destination.clear();
             destination.position(destinationIndex);
             destination.put(sourcePixels, sourceIndex, rowBytesToCopy);
