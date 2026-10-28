@@ -74,8 +74,8 @@ public class VideoPlayerModel {
     private AudioPlayer audioPlayer;
     private PreparedFrame preparedFrame;
     private boolean prepareNextFrameQueued;
-    private boolean playbackOpen;
-    private boolean pauseRequested;
+    private volatile boolean playbackOpen;
+    private volatile boolean pauseRequested;
     private boolean audioOutputEnabled;
     private boolean audioAvailable;
     private boolean frameProcessorsInitialised;
@@ -85,7 +85,7 @@ public class VideoPlayerModel {
     private double frameRate;
     private int intFrameRate;
     private int totalVideoFrames;
-    private long firstTimestampUs = NO_SEEK_REQUEST;
+    private volatile long firstTimestampUs = NO_SEEK_REQUEST;
     private long logicalPlaybackBaseUs;
     private long playbackStartNs;
     private long pauseStartedNs;
@@ -309,7 +309,7 @@ public class VideoPlayerModel {
     }
 
     private void startMultiThreadedPipeline() {
-        int threads = Math.max(2, Runtime.getRuntime().availableProcessors());
+        int threads = Math.max(2, Runtime.getRuntime().availableProcessors() - 1);
         workerPool = new ThreadPoolExecutor(
                 threads,
                 threads,
@@ -319,6 +319,7 @@ public class VideoPlayerModel {
                 r -> {
                     Thread t = new Thread(r, "VideoPlayer-Worker");
                     t.setDaemon(true);
+                    t.setPriority(Thread.NORM_PRIORITY - 1);
                     return t;
                 });
 
@@ -635,6 +636,7 @@ public class VideoPlayerModel {
         if (preparedFrame != null) {
             if (preparedFrame.targetTimeNs() <= now) {
                 displayPreparedFrame(now);
+                return;
             } else {
                 return; // Current frame is not due yet
             }
@@ -699,10 +701,11 @@ public class VideoPlayerModel {
                 if (readyFrame.targetTimeNs() <= now) {
                     preparedFrame = readyFrame;
                     displayPreparedFrame(now);
+                    return;
                 } else {
                     preparedFrame = readyFrame;
+                    return;
                 }
-                break;
             } catch (CancellationException e) {
                 // Normal when epoch changes or during seeks; safely drop and continue
             } catch (CompletionException e) {
@@ -821,6 +824,7 @@ public class VideoPlayerModel {
             try {
                 demuxerThread.join(500);
             } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
             }
             demuxerThread = null;
         }

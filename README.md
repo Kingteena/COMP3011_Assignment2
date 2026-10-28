@@ -1,42 +1,27 @@
 # COMP3011 High-Performance Video Player
 
-A thread-safe, pipelined, multi-threaded video playback engine built with JavaFX and FFmpeg (JavaCV) for Adelaide
-University COMP3011 Assignment 2.
+A thread-safe, pipelined, multi-threaded video playback engine built with JavaFX and FFmpeg (JavaCV) for Adelaide University COMP3011 Assignment 2.
 
 ---
 
 ## 1. Command-Line Architecture & Extensibility (SOLID Design)
 
-Command-line parsing and effect instantiation are decoupled across two classes to adhere to the Single Responsibility
-and Open-Closed Principles:
+Command-line parsing and effect instantiation are decoupled across two classes to adhere to the Single Responsibility and Open-Closed Principles:
 
-- **`CommandLineController`**: Parses short flags (`-n`), long options (`--number-frames`), and stacked flag clusters
-  (`-axjf`, `-nssnfwyvdjmbp`) in strict left-to-right order. It validates mutually exclusive display options (`-1` vs
-  `-2`), ensures `--help` / `-h` never launches the GUI when combined with a valid file, and rejects invalid option
-  combinations even when `-h` is present.
-- **`FrameProcessorFactory`**: Encapsulates the mapping from CLI tokens to `Supplier<FrameProcessor>` constructor
-  references (`FrameNumberer::new`, `FrameScratcher::new`, etc.). Storing `Supplier` factories rather than singleton
-  instances guarantees that repeated flags (such as `-ss`) instantiate distinct processor objects with independent
-  per-instance random seeds (`instanceIndex`).
-- **Adding a New `FrameProcessor`**:
-    1. Subclass `FrameProcessor` and implement `initialise(InfoVideo)` and `process(Frame, InfoFrame)`. Ensure
-       `process()` is deterministic (seeded via `info.frameNumber()`) and uses local or `ThreadLocal` scratch buffers
-       rather than mutable instance arrays.
-    2. Register the constructor reference in `FrameProcessorFactory`'s `static` block via
-       `register(shortCode, longName, NewProcessor::new)`.
-    3. Add the option description to `CommandLineController.printHelp()`.
+-   **`CommandLineController`**: Parses short flags (`-n`), long options (`--number-frames`), and stacked flag clusters (`-axjf`, `-nssnfwyvdjmbp`) in strict left-to-right order. It validates mutually exclusive display options (`-1` vs `-2`), ensures `--help` / `-h` never launches the GUI when combined with a valid file, and rejects invalid option combinations even when `-h` is present.
+-   **`FrameProcessorFactory`**: Encapsulates the mapping from CLI tokens to `Supplier<FrameProcessor>` constructor references (`FrameNumberer::new`, `FrameScratcher::new`, etc.). Storing `Supplier` factories rather than singleton instances guarantees that repeated flags (such as `-ss`) instantiate distinct processor objects with independent per-instance random seeds (`instanceIndex`).
+-   **Adding a New `FrameProcessor`**:
+    1.  Subclass `FrameProcessor` and implement `initialise(InfoVideo)` and `process(Frame, InfoFrame)`. Ensure `process()` is deterministic (seeded via `info.frameNumber()`) and uses local or `ThreadLocal` scratch buffers rather than mutable instance arrays.
+    2.  Register the constructor reference in `FrameProcessorFactory`'s `static` block via `register(shortCode, longName, NewProcessor::new)`.
+    3.  Add the option description to `CommandLineController.printHelp()`.
 
 ---
 
 ## 2. Multi-Threaded Concurrency Architecture
 
-In the supplied single-threaded player, demuxing, decoding, multi-pass pixel filtering, and JavaFX image conversion all
-executed cooperatively on the JavaFX Application Thread. Stacking heavy effects (`FrameMottler`, `FrameBleeder`,
-`FramePepperer`) on HD media quickly exceeded the 24 fps frame budget (`41,666 us`), causing negative frame headroom,
-audio stalls, and unresponsive window resizing.
+In the supplied single-threaded player, demuxing, decoding, multi-pass pixel filtering, and JavaFX image conversion all executed cooperatively on the JavaFX Application Thread. Stacking heavy effects (`FrameMottler`, `FrameBleeder`, `FramePepperer`) on HD media quickly exceeded the 24 fps frame budget (`41,666 us`), causing negative frame headroom, audio stalls, and unresponsive window resizing.
 
-To maximize multi-core throughput while preserving 100% bit-exact frame accuracy and responsive UI controls,
-`VideoPlayerModel` implements a Demuxer + Worker Pool + Bounded Ordered Future Queue architecture:
+To maximize multi-core throughput while preserving 100% bit-exact frame accuracy and responsive UI controls, `VideoPlayerModel` implements a Demuxer + Worker Pool + Bounded Ordered Future Queue architecture:
 
 ```
 [FFmpeg Demuxer Thread] (VideoPlayer-Demuxer)
@@ -57,53 +42,39 @@ Non-blocking peek() & isDone() poll -> displayPreparedFrame(now)
 
 ### Components
 
-1. **Dedicated Demuxer Thread (`VideoPlayer-Demuxer`)**:
-
-    - Sole owner of the FFmpeg demuxer read loop (`grabFrame()`).
-    - Deep-clones each raw video frame (`rawFrame.clone()`) before passing it off to worker threads, preventing race
-      conditions and native buffer corruption.
-    - Routes demuxed audio samples immediately into thread-safe pending audio queues.
-    - Pushes an asynchronous task wrapper (`EpochFuture`) into the bounded pipeline queue.
-2. **Parallel Worker Thread Pool (`VideoPlayer-Worker`)**:
-
-    - Sized to `Runtime.getRuntime().availableProcessors()` worker threads.
-    - Executes the full sequence of `FrameProcessor` effects in parallel across distinct frames.
-    - Employs `ThreadLocal<JavaFXFrameConverter>` instances to perform parallel hardware/software colorspace conversions
-      without lock contention or converter state sharing.
-    - Safely frees native frame memory inside `finally { frameToProcess.close(); }`.
-3. **In-Order Bounded Pipeline Queue (`framePipelineQueue`)**:
-
-    - A `BlockingQueue<EpochFuture>` bounded to 16 frames provides backpressure to prevent unbounded heap growth while
-      buffering ~660 ms of video ahead of time.
-    - Guarantees strict FIFO presentation ordering on the UI thread regardless of worker thread scheduling variances.
-4. **Single-Threaded Reference Path**:
-
-    - The original single-threaded execution model is preserved and cleanly isolated via constructor overload
-      (`boolean multiThreaded`), allowing direct comparative testing and verification in `mvn verify`.
+1.  **Dedicated Demuxer Thread (`VideoPlayer-Demuxer`)**:
+    
+    -   Sole owner of the FFmpeg demuxer read loop (`grabFrame()`).
+    -   Deep-clones each raw video frame (`rawFrame.clone()`) before passing it off to worker threads, preventing race conditions and native buffer corruption.
+    -   Routes demuxed audio samples immediately into thread-safe pending audio queues.
+    -   Pushes an asynchronous task wrapper (`EpochFuture`) into the bounded pipeline queue.
+2.  **Parallel Worker Thread Pool (`VideoPlayer-Worker`)**:
+    
+    -   Sized to `Runtime.getRuntime().availableProcessors()` worker threads.
+    -   Executes the full sequence of `FrameProcessor` effects in parallel across distinct frames.
+    -   Employs `ThreadLocal<JavaFXFrameConverter>` instances to perform parallel hardware/software colorspace conversions without lock contention or converter state sharing.
+    -   Safely frees native frame memory inside `finally { frameToProcess.close(); }`.
+3.  **In-Order Bounded Pipeline Queue (`framePipelineQueue`)**:
+    
+    -   A `BlockingQueue<EpochFuture>` bounded to 16 frames provides backpressure to prevent unbounded heap growth while buffering ~660 ms of video ahead of time.
+    -   Guarantees strict FIFO presentation ordering on the UI thread regardless of worker thread scheduling variances.
+4.  **Single-Threaded Reference Path**:
+    
+    -   The original single-threaded execution model is preserved and cleanly isolated via constructor overload (`boolean multiThreaded`), allowing direct comparative testing and verification in `mvn verify`.
 
 ### Architectural Evaluation: Worker Pool vs. Staged Filter Pipeline (Amdahl's Law)
 
-An alternative architecture often considered for video processing is a **Staged Filter Pipeline**, where each filter
-stage runs in its own dedicated thread with intermediate queues connecting successive stages. While conceptually
-intuitive, a staged pipeline suffers from fundamental concurrency bottlenecks under **Amdahl's Law**:
+An alternative architecture often considered for video processing is a **Staged Filter Pipeline**, where each filter stage runs in its own dedicated thread with intermediate queues connecting successive stages. While conceptually intuitive, a staged pipeline suffers from fundamental concurrency bottlenecks under **Amdahl's Law**:
 
-1. **Slowest-Stage Bottleneck (Throughput Throttling)**: In a staged pipeline, the overall throughput cannot exceed the
-   rate of the single slowest stage (e.g. `FrameBleeder`). Faster stages (`FrameFlickerer`, `FrameYellower`) finish
-   early and starve or block, leaving CPU cores idle regardless of how many cores are provisioned.
-2. **Dynamic Workload Imbalance**: Processing time per filter varies across frames based on visual contents (e.g.,
-   number of bright pixels in `FrameBleeder`, particle counts in `FramePepperer`). Staged pipelines cannot redistribute
-   idle CPU capacity between stages to absorb transient spikes.
-3. **Queue Synchronization & Cache Overhead**: Chaining 11+ intermediate blocking queues introduces massive thread
-   context switching, thread synchronization latency, and CPU cache invalidations as frame data bounces between cores.
+1.  **Slowest-Stage Bottleneck (Throughput Throttling)**: In a staged pipeline, the overall throughput cannot exceed the rate of the single slowest stage (e.g. `FrameBleeder`). Faster stages (`FrameFlickerer`, `FrameYellower`) finish early and starve or block, leaving CPU cores idle regardless of how many cores are provisioned.
+2.  **Dynamic Workload Imbalance**: Processing time per filter varies across frames based on visual contents (e.g., number of bright pixels in `FrameBleeder`, particle counts in `FramePepperer`). Staged pipelines cannot redistribute idle CPU capacity between stages to absorb transient spikes.
+3.  **Queue Synchronization & Cache Overhead**: Chaining 11+ intermediate blocking queues introduces massive thread context switching, thread synchronization latency, and CPU cache invalidations as frame data bounces between cores.
 
-In contrast, our **Worker Pool + Bounded Ordered Queue** architecture assigns the *entire* filter chain of an individual
-frame to an available worker thread:
+In contrast, our **Worker Pool + Bounded Ordered Queue** architecture assigns the *entire* filter chain of an individual frame to an available worker thread:
 
-- **Maximum Multi-Core Saturation**: Every worker thread operates at 100% capacity on independent frames, achieving
-  near-linear scaling up to the parallel limit of Amdahl's Law.
-- **Minimal Queue Overhead**: Exactly one queue submission per frame into `framePipelineQueue`.
-- **Deterministic In-Order Presentation**: Bounded queue with FIFO order guarantees that frames are delivered to JavaFX
-  in exact display order without reordering complexity.
+-   **Maximum Multi-Core Saturation**: Every worker thread operates at 100% capacity on independent frames, achieving near-linear scaling up to the parallel limit of Amdahl's Law.
+-   **Minimal Queue Overhead**: Exactly one queue submission per frame into `framePipelineQueue`.
+-   **Deterministic In-Order Presentation**: Bounded queue with FIFO order guarantees that frames are delivered to JavaFX in exact display order without reordering complexity.
 
 ---
 
@@ -111,50 +82,38 @@ frame to an available worker thread:
 
 ### FFmpeg Grabber Confinement (`grabberLock`)
 
-The underlying native `FFmpegFrameGrabber` is not thread-safe. All grabber invocations—including decoding (`grab()`),
-repositioning (`setTimestamp()`), starting (`start()`), and closing (`close()`)—are strictly guarded by
-`synchronized (grabberLock)`. Crucially, `grabberLock` is **never** held while blocking on queue operations (`put()` /
-`take()`), guaranteeing freedom from deadlock.
+The underlying native `FFmpegFrameGrabber` is not thread-safe. All grabber invocations—including decoding (`grab()`), repositioning (`setTimestamp()`), starting (`start()`), and closing (`close()`)—are strictly guarded by `synchronized (grabberLock)`. Crucially, `grabberLock` is **never** held while blocking on queue operations (`put()` / `take()`), guaranteeing freedom from deadlock.
 
 ### Thread-Safe Audio Scheduling (`pendingAudio`)
 
-Audio demuxing runs asynchronously on the demuxer thread while audio buffer submission runs synchronously on the JavaFX
-rendering thread inside `writeDueAudio(now)`. The `pendingAudio` queue is strictly synchronized to prevent packet
-corruption during playback, volume/mute toggles, or seek flushes.
+Audio demuxing runs asynchronously on the demuxer thread while audio buffer submission runs synchronously on the JavaFX rendering thread inside `writeDueAudio(now)`. The `pendingAudio` queue is strictly synchronized to prevent packet corruption during playback, volume/mute toggles, or seek flushes.
 
 ### Epoch-Based Rapid-Seek Invalidation
 
-During rapid seeking or user scrubbing, worker threads could waste CPU cycles processing obsolete frames. We implement
-atomic epoch tracking (`AtomicLong currentEpoch`):
+During rapid seeking or user scrubbing, worker threads could waste CPU cycles processing obsolete frames. We implement atomic epoch tracking (`AtomicLong currentEpoch`):
 
-- Each seek or stop operation atomically increments `currentEpoch.getAndIncrement()`.
-- Unstarted worker tasks in `workerPool.getQueue()` are instantly cleared.
-- In-flight worker threads perform **intra-pipeline cancellation**: checking
-  `if (epoch != currentEpoch.get()) return null;` before *each* `FrameProcessor.process(...)` invocation.
-- Obsolete frames already in the queue are immediately identified and discarded by the display loop.
+-   Each seek or stop operation atomically increments `currentEpoch.getAndIncrement()`.
+-   Unstarted worker tasks in `workerPool.getQueue()` are instantly cleared.
+-   In-flight worker threads perform **intra-pipeline cancellation**: checking `if (epoch != currentEpoch.get()) return null;` before *each* `FrameProcessor.process(...)` invocation.
+-   Obsolete frames already in the queue are immediately identified and discarded by the display loop.
 
 ### Clean End-of-File (EOF) Lifecycle
 
-Because the demuxer operates up to 16 frames ahead of the presentation clock, reaching EOF (`grab() == null`) occurs
-before the final frames have been displayed:
+Because the demuxer operates up to 16 frames ahead of the presentation clock, reaching EOF (`grab() == null`) occurs before the final frames have been displayed:
 
-- The demuxer thread enqueues a non-null `EpochFuture.eof(epoch)` sentinel token into `framePipelineQueue`.
-- The demuxer thread parks on `demuxerSignal.wait()` instead of terminating.
-- The UI thread cleanly drains and displays all remaining frames and flushes trailing audio.
-- Only when the UI thread consumes the EOF sentinel does the player transition to `Playback finished`.
-- When seeking backwards (`backFiveSeconds()`) or restarting (`startOver()`) from EOF, `demuxerSignal.notifyAll()`
-  cleanly unparks the demuxer thread and resumes streaming with zero deadlocks.
+-   The demuxer thread enqueues a non-null `EpochFuture.eof(epoch)` sentinel token into `framePipelineQueue`.
+-   The demuxer thread parks on `demuxerSignal.wait()` instead of terminating.
+-   The UI thread cleanly drains and displays all remaining frames and flushes trailing audio.
+-   Only when the UI thread consumes the EOF sentinel does the player transition to `Playback finished`.
+-   When seeking backwards (`backFiveSeconds()`) or restarting (`startOver()`) from EOF, `demuxerSignal.notifyAll()` cleanly unparks the demuxer thread and resumes streaming with zero deadlocks.
 
 ---
 
 ## 3. Thread-Safe FrameProcessors & Scratch State Optimisation
 
-Under concurrent processing, multiple worker threads execute `process(Frame, InfoFrame)` simultaneously on shared
-`FrameProcessor` instances. Mutable instance buffers create severe data races and visual artifacts, while allocating
-arrays per frame leads to catastrophic GC heap thrashing.
+Under concurrent processing, multiple worker threads execute `process(Frame, InfoFrame)` simultaneously on shared `FrameProcessor` instances. Mutable instance buffers create severe data races and visual artifacts, while allocating arrays per frame leads to catastrophic GC heap thrashing.
 
-To eliminate thread contention while avoiding allocation overhead, mutable scratch buffers were refactored using
-`ThreadLocal` storage:
+To eliminate thread contention while avoiding allocation overhead, mutable scratch buffers were refactored using `ThreadLocal` storage:
 
 FrameProcessor
 
@@ -180,9 +139,7 @@ Shared `scratch` buffer (`brightMask`, `horizontalBlurMask`, `blurredMask`)
 
 Replaced with `ThreadLocal<BleedScratch> scratchHolder` caching all 3 mask buffers per thread
 
-All remaining processors (`FrameBlackAndWhiter`, `FrameDuster`, `FrameFlickerer`, `FrameNumberer`, `FramePepperer`,
-`FrameScratcher`, `FrameVignetter`, `FrameYellower`) are inherently stateless or operate purely on thread-confined local
-variables.
+All remaining processors (`FrameBlackAndWhiter`, `FrameDuster`, `FrameFlickerer`, `FrameNumberer`, `FramePepperer`, `FrameScratcher`, `FrameVignetter`, `FrameYellower`) are inherently stateless or operate purely on thread-confined local variables.
 
 ---
 
@@ -190,22 +147,18 @@ variables.
 
 ### Automated Test Suite (23 Tests, 100% Pass Rate)
 
-1. **`CommandLineControllerTest` (19 Tests)**:
-
-    - Verifies exact character-for-character `--help` output matching the COMP3011 specification.
-    - Tests short flags, long flags, stacked flags (`-jfddn`, `-nssnfwyvdjmbp`), repeated filters, monitor options
-      (`-1`, `-2`), and error handling (`shouldLaunchApplication() == false`).
-2. **`FrameProcessorConcurrencyTest` (2 Tests)**:
-
-    - **Bit-Exact Determinism**: Verifies that running frames through all 11 `FrameProcessor` subclasses across parallel
-      worker threads produces pixel-for-pixel bit-exact results identical to sequential single-threaded execution.
-    - **Thread-Sharing Stress Test**: Concurrently executes 200 iterations over shared instances of `FrameJitterer`,
-      `FrameMottler`, and `FrameBleeder` across 16 worker threads with zero race conditions.
-3. **`PerformanceComparisonTest` (2 Tests)**:
-
-    - **720p HD Concurrency Benchmark**: Stresses the complete 13-filter specification chain (`-nssnfwyvdjmbp`) on true
-      720p HD frames (`1280x720`).
-    - **EOF & Rapid-Seek Lifecycle**: Confirms display-aligned EOF termination and seamless backward seeking recovery.
+1.  **`CommandLineControllerTest` (19 Tests)**:
+    
+    -   Verifies exact character-for-character `--help` output matching the COMP3011 specification.
+    -   Tests short flags, long flags, stacked flags (`-jfddn`, `-nssnfwyvdjmbp`), repeated filters, monitor options (`-1`, `-2`), and error handling (`shouldLaunchApplication() == false`).
+2.  **`FrameProcessorConcurrencyTest` (2 Tests)**:
+    
+    -   **Bit-Exact Determinism**: Verifies that running frames through all 11 `FrameProcessor` subclasses across parallel worker threads produces pixel-for-pixel bit-exact results identical to sequential single-threaded execution.
+    -   **Thread-Sharing Stress Test**: Concurrently executes 200 iterations over shared instances of `FrameJitterer`, `FrameMottler`, and `FrameBleeder` across 16 worker threads with zero race conditions.
+3.  **`PerformanceComparisonTest` (2 Tests)**:
+    
+    -   **720p HD Concurrency Benchmark**: Stresses the complete 13-filter specification chain (`-nssnfwyvdjmbp`) on true 720p HD frames (`1280x720`).
+    -   **EOF & Rapid-Seek Lifecycle**: Confirms display-aligned EOF termination and seamless backward seeking recovery.
 
 ### Measured Concurrency Benchmark Results
 
@@ -222,21 +175,10 @@ Observed Concurrency Speedup: 4.35x faster
 ================================================================================
 ```
 
-### Manual testing with given file
-
-The file given on the assignment page of a [trailer](https://dvdloc8.com/clip.php?movieid=12167&clipid=2) was used for
-manual testing, often using 10-15 filters and high frequency seeks and restarts. Testing was done on a 2020 MacBook Pro
-with 8 cores and 16 threads, and the player was able to maintain smooth playback at 24fps with all filters applied, even
-during rapid seeking.
-
 #### Real-Time 24fps Playback Budget Analysis (41.67 ms/frame)
 
-- **Single-Threaded Bottleneck**: Under 720p HD resolution with the full specification filter chain (`-nssnfwyvdjmbp`),
-  single-threaded processing takes **36.79 ms/frame** on average, and frequently exceeds the **41.67 ms frame budget**
-  (recording 5 late frames and negative headroom spikes on complex scenes).
-- **Multi-Threaded Headroom**: The multi-threaded worker pipeline delivers frames in **8.46 ms/frame** (**117.93 fps**),
-  maintaining over 33 ms of headroom per frame within the 41.67 ms budget with a **4.35x concurrency speedup** on
-  multi-core processors.
+-   **Single-Threaded Bottleneck**: Under 720p HD resolution with the full specification filter chain (`-nssnfwyvdjmbp`), single-threaded processing takes **36.79 ms/frame** on average, and frequently exceeds the **41.67 ms frame budget** (recording 5 late frames and negative headroom spikes on complex scenes).
+-   **Multi-Threaded Headroom**: The multi-threaded worker pipeline delivers frames in **8.46 ms/frame** (**117.93 fps**), maintaining over 33 ms of headroom per frame within the 41.67 ms budget with a **4.35x concurrency speedup** on multi-core processors.
 
 ---
 
@@ -244,8 +186,8 @@ during rapid seeking.
 
 ### Prerequisites
 
-- JDK 25 (`--enable-native-access=ALL-UNNAMED` enabled)
-- Apache Maven 3.8+
+-   JDK 25 (`--enable-native-access=ALL-UNNAMED` enabled)
+-   Apache Maven 3.8+
 
 ### Build & Package
 
