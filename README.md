@@ -29,7 +29,7 @@ To maximize multi-core throughput while preserving 100% bit-exact frame accuracy
                    ├─► Audio Samples ──► synchronized(pendingAudio) ──► AudioPlayer
                    │
                    ▼ (Video Frame cloned inside grabberLock)
-[Worker ThreadPoolExecutor] (N = availableProcessors)
+[Worker ThreadPoolExecutor] (N = availableProcessors - 1, min 2)
                    │  Runs full FrameProcessor chain + ThreadLocal
                    │  Checks currentEpoch before each filter for instant seek abortion
                    ▼
@@ -50,7 +50,7 @@ Non-blocking peek() & isDone() poll -> displayPreparedFrame(now)
     -   Pushes an asynchronous task wrapper (`EpochFuture`) into the bounded pipeline queue.
 2.  **Parallel Worker Thread Pool (`VideoPlayer-Worker`)**:
     
-    -   Sized to `Runtime.getRuntime().availableProcessors()` worker threads.
+    -   Sized to `Math.max(2, Runtime.getRuntime().availableProcessors() - 1)` worker threads at `Thread.NORM_PRIORITY - 1` to reserve dedicated CPU capacity for the JavaFX QuantumRenderer and GUI event thread.
     -   Executes the full sequence of `FrameProcessor` effects in parallel across distinct frames.
     -   Employs `ThreadLocal<JavaFXFrameConverter>` instances to perform parallel hardware/software colorspace conversions without lock contention or converter state sharing.
     -   Safely frees native frame memory inside `finally { frameToProcess.close(); }`.
@@ -78,7 +78,7 @@ In contrast, our **Worker Pool + Bounded Ordered Queue** architecture assigns th
 
 ---
 
-## 2. Concurrency Safety & Thread Confinement
+## 3. Concurrency Safety & Thread Confinement
 
 ### FFmpeg Grabber Confinement (`grabberLock`)
 
@@ -109,80 +109,63 @@ Because the demuxer operates up to 16 frames ahead of the presentation clock, re
 
 ---
 
-## 3. Thread-Safe FrameProcessors & Scratch State Optimisation
+## 4. Thread-Safe FrameProcessors & Scratch State Optimisation
 
 Under concurrent processing, multiple worker threads execute `process(Frame, InfoFrame)` simultaneously on shared `FrameProcessor` instances. Mutable instance buffers create severe data races and visual artifacts, while allocating arrays per frame leads to catastrophic GC heap thrashing.
 
-To eliminate thread contention while avoiding allocation overhead, mutable scratch buffers were refactored using `ThreadLocal` storage:
+To eliminate thread contention while avoiding allocation overhead, mutable scratch buffers and segment caches were refactored using thread confinement and concurrent maps:
 
-FrameProcessor
-
-Thread-Safety Hazard
-
-Resolution Strategy
-
-`FrameJitterer`
-
-Shared `sourcePixels` byte array reused across frames
-
-Replaced with `ThreadLocal<byte[]> sourcePixelsHolder` sized dynamically to image stride
-
-`FrameMottler`
-
-Shared `damageMaskCache` byte array and `blockBlueScaleIndex`
-
-Replaced with `ThreadLocal<DamageMaskCache> damageMaskCacheHolder`; scale index array allocated as a local variable
-
-`FrameBleeder`
-
-Shared `scratch` buffer (`brightMask`, `horizontalBlurMask`, `blurredMask`)
-
-Replaced with `ThreadLocal<BleedScratch> scratchHolder` caching all 3 mask buffers per thread
+| FrameProcessor | Thread-Safety Hazard | Concurrency & Memory Optimisation Strategy |
+|---|---|---|
+| `FrameJitterer` | Shared `sourcePixels` byte array reused across frames | Replaced with `ThreadLocal<byte[]>` sized dynamically to image stride. |
+| `FrameMottler` | Shared `damageMaskCache` causing multi-worker contention and periodic 72-frame segment cache-miss spikes; shared `blockBlueScaleIndex` | Replaced segment cache with instance-shared `ConcurrentHashMap<Integer, double[]> damageMaskBySegment` (computed once across threads, reusing segment + 1 as mask A); scale indices allocated as thread-confined stack local array; multi-scale noise buffers pooled via `ThreadLocal<MottleScratch>`. |
+| `FrameBleeder` | Shared mutable `scratch` buffers (`brightMask`, `horizontalBlurMask`, `blurredMask`) and repeated per-frame `ByteBuffer` pixel reading | Encapsulated all 3 blur masks and a pre-allocated `byte[]` pixel buffer in `ThreadLocal<BleedScratch>` to eliminate data races and heap allocation churn. |
 
 All remaining processors (`FrameBlackAndWhiter`, `FrameDuster`, `FrameFlickerer`, `FrameNumberer`, `FramePepperer`, `FrameScratcher`, `FrameVignetter`, `FrameYellower`) are inherently stateless or operate purely on thread-confined local variables.
 
 ---
 
-## 4. Verification & Performance Benchmarking
+## 5. Verification & Performance Benchmarking
 
-### Automated Test Suite (23 Tests, 100% Pass Rate)
+### Automated Test Suite (25 Tests, 100% Pass Rate)
 
-1.  **`CommandLineControllerTest` (19 Tests)**:
+1.  **`CommandLineControllerTest` (21 Tests)**:
     
     -   Verifies exact character-for-character `--help` output matching the COMP3011 specification.
     -   Tests short flags, long flags, stacked flags (`-jfddn`, `-nssnfwyvdjmbp`), repeated filters, monitor options (`-1`, `-2`), and error handling (`shouldLaunchApplication() == false`).
+    -   Validates combined invalid options with `-h` and `--help` for correct error reporting and exit codes.
 2.  **`FrameProcessorConcurrencyTest` (2 Tests)**:
     
     -   **Bit-Exact Determinism**: Verifies that running frames through all 11 `FrameProcessor` subclasses across parallel worker threads produces pixel-for-pixel bit-exact results identical to sequential single-threaded execution.
     -   **Thread-Sharing Stress Test**: Concurrently executes 200 iterations over shared instances of `FrameJitterer`, `FrameMottler`, and `FrameBleeder` across 16 worker threads with zero race conditions.
 3.  **`PerformanceComparisonTest` (2 Tests)**:
     
-    -   **720p HD Concurrency Benchmark**: Stresses the complete 13-filter specification chain (`-nssnfwyvdjmbp`) on true 720p HD frames (`1280x720`).
+    -   **720p HD Concurrency Benchmark**: Stresses a massive 26-filter specification chain (`-nssnfwyvdjmbpnssnfwyvdjmbp`) on true 720p HD frames (`1280x720`).
     -   **EOF & Rapid-Seek Lifecycle**: Confirms display-aligned EOF termination and seamless backward seeking recovery.
 
 ### Measured Concurrency Benchmark Results
 
 ```
 ================================================================================
-  COMP3011 Video Player 720p HD Benchmark Report (-nssnfwyvdjmbp)  
+  COMP3011 Video Player 720p HD Benchmark Report (-nssnfwyvdjmbpnssnfwyvdjmbp)  
 ================================================================================
 Architecture       | Total Time    | Avg ms/Frame   | Effective FPS   | Late Frames
 -------------------+---------------+----------------+-----------------+------------
-Single-Threaded    |        883 ms |       36.79 ms |        27.17 fps |           5
-Multi-Threaded     |        203 ms |        8.46 ms |       117.93 fps |           1
+Single-Threaded    |        974 ms |       40.58 ms |        24.64 fps |           0
+Multi-Threaded     |        288 ms |       12.00 ms |        83.28 fps |           0
 ================================================================================
-Observed Concurrency Speedup: 4.35x faster
+Observed Concurrency Speedup: 3.38x faster
 ================================================================================
 ```
 
 #### Real-Time 24fps Playback Budget Analysis (41.67 ms/frame)
 
--   **Single-Threaded Bottleneck**: Under 720p HD resolution with the full specification filter chain (`-nssnfwyvdjmbp`), single-threaded processing takes **36.79 ms/frame** on average, and frequently exceeds the **41.67 ms frame budget** (recording 5 late frames and negative headroom spikes on complex scenes).
--   **Multi-Threaded Headroom**: The multi-threaded worker pipeline delivers frames in **8.46 ms/frame** (**117.93 fps**), maintaining over 33 ms of headroom per frame within the 41.67 ms budget with a **4.35x concurrency speedup** on multi-core processors.
+-   **Single-Threaded Bottleneck**: Under 720p HD resolution with a heavy 26-processor filter chain (`-nssnfwyvdjmbpnssnfwyvdjmbp`), single-threaded processing consumes **40.58 ms/frame** on average, leaving virtually 0 ms of spare headroom. On complex frames, it breaches the 41.67 ms budget, resulting in frame stutter.
+-   **Multi-Threaded Headroom**: The multi-threaded worker pipeline processes frames in **12.00 ms/frame** (**83.28 fps**), providing over **29 ms of spare headroom per frame** within the 41.67 ms budget. This achieves a **3.38x concurrency speedup** on multi-core processors with zero late frames.
 
 ---
 
-## 5. Building and Running
+## 6. Building and Running
 
 ### Prerequisites
 
